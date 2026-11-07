@@ -9,16 +9,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from sarthi.core.sandbox.base import BaseSandboxBackend
 from sarthi.core.sandbox.backends.linux import LinuxBubblewrapBackend
 from sarthi.core.sandbox.backends.macos import MacOSSeatbeltBackend
 from sarthi.core.sandbox.backends.null import NullSandboxBackend
 from sarthi.core.sandbox.backends.windows import WindowsAppContainerBackend
+from sarthi.core.sandbox.base import BaseSandboxBackend
 from sarthi.core.sandbox.exceptions import (
     SandboxCapabilityUnavailableError,
-    SandboxCleanupError,
-    SandboxError,
-    SandboxInitializationError,
 )
 from sarthi.core.sandbox.policy import (
     CapabilityStatus,
@@ -141,7 +138,7 @@ class SandboxManager:
         finally:
             try:
                 self.backend.cleanup()
-            except Exception as e:
+            except Exception:
                 # Log cleanup warning but do not overwrite primary execution exception
                 pass
 

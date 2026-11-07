@@ -13,7 +13,6 @@ from pathlib import Path
 
 from sarthi.core.sandbox.exceptions import GitSecurityPolicyError
 
-
 # Denied Git-specific and network proxy environment variables
 DENIED_GIT_ENV_PREFIXES = ("GIT_",)
 DENIED_PROXY_ENV = (

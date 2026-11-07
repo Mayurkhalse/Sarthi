@@ -8,7 +8,6 @@ AppContainer SIDs, zero network capabilities (WFP block), Job Objects
 from __future__ import annotations
 
 import ctypes
-import os
 import subprocess
 import sys
 import time
@@ -21,7 +20,6 @@ from sarthi.core.sandbox.exceptions import (
     SandboxCapabilityUnavailableError,
     SandboxExecutionError,
     SandboxInitializationError,
-    SandboxTimeoutError,
 )
 from sarthi.core.sandbox.policy import (
     CapabilityStatus,

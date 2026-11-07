@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from sarthi.core.models import Finding, RunContext, Severity
-from sarthi.core.sandbox.exceptions import SandboxError, SandboxTimeoutError
+from sarthi.core.sandbox.exceptions import SandboxError
 from sarthi.core.sandbox.manager import SandboxManager
 from sarthi.core.verify.runners.base import Runner
 from sarthi.core.verify.trust import (
