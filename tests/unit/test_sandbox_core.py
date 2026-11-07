@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from sarthi.core.models import ProjectConfig, RunContext
+from sarthi.core.models import ProjectConfig, RunContext, VerifyConfig
 from sarthi.core.sandbox import (
     CapabilityStatus,
     FilesystemPolicy,
@@ -409,11 +409,15 @@ def test_test_runner_with_sandbox_manager_error_handling(tmp_path: Path) -> None
     mock_mgr.run.side_effect = SandboxCapabilityUnavailableError("Linux namespaces not supported")
 
     trust_mgr = MagicMock(spec=CommandTrustManager)
+    trust_mgr.is_approved.return_value = True
     runner = TestRunner(trust_mgr=trust_mgr, sandbox_mgr=mock_mgr)
 
     ctx = RunContext(
         project_root=tmp_path,
-        config=ProjectConfig(project_name="sandbox_test"),
+        config=ProjectConfig(
+            project_name="sandbox_test",
+            verify=VerifyConfig(commands={"test": "pytest"}),
+        ),
     )
 
     findings = runner.run(ctx, [])
