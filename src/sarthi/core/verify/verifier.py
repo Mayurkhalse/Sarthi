@@ -15,6 +15,7 @@ from sarthi.core.models import (
 )
 from sarthi.core.pathguard import PathGuard
 from sarthi.core.rules import RuleLoader, RuleSelector
+from sarthi.core.sandbox.git import SterileGitExecutor
 from sarthi.core.verify.runners import (
     ChecklistRunner,
     ESLintRunner,
@@ -53,12 +54,11 @@ class Verifier:
         if (self.root / ".git").is_dir():
             return True
         try:
-            res = subprocess.run(
-                ["git", "rev-parse", "--is-inside-work-tree"],
-                cwd=str(self.root),
-                capture_output=True,
-                text=True,
-                timeout=5,
+            res = SterileGitExecutor.run_tier1_query(
+                "rev-parse",
+                ["--is-inside-work-tree"],
+                cwd=self.root,
+                timeout=5.0,
             )
             return res.returncode == 0 and res.stdout.strip() == "true"
         except Exception:
@@ -74,13 +74,12 @@ class Verifier:
         if self._is_git_repo():
             changed: set[Path] = set()
             try:
-                # 1. Staged and unstaged diff against HEAD
-                res1 = subprocess.run(
-                    ["git", "diff", "--name-only", "HEAD"],
-                    cwd=str(self.root),
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
+                # 1. Staged and unstaged diff against HEAD (sterile Tier 1 query)
+                res1 = SterileGitExecutor.run_tier1_query(
+                    "diff",
+                    ["--name-only", "HEAD"],
+                    cwd=self.root,
+                    timeout=5.0,
                 )
                 if res1.returncode == 0:
                     for line in res1.stdout.splitlines():
@@ -90,13 +89,12 @@ class Verifier:
                             if p.is_file():
                                 changed.add(p.resolve())
 
-                # 2. Untracked files via status
-                res2 = subprocess.run(
-                    ["git", "status", "--porcelain"],
-                    cwd=str(self.root),
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
+                # 2. Untracked files via status (sterile Tier 1 query)
+                res2 = SterileGitExecutor.run_tier1_query(
+                    "status",
+                    ["--porcelain"],
+                    cwd=self.root,
+                    timeout=5.0,
                 )
                 if res2.returncode == 0:
                     for line in res2.stdout.splitlines():

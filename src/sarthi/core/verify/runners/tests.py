@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 
 from sarthi.core.models import Finding, RunContext, Severity
+from sarthi.core.sandbox.exceptions import SandboxError, SandboxTimeoutError
+from sarthi.core.sandbox.manager import SandboxManager
 from sarthi.core.verify.runners.base import Runner
 from sarthi.core.verify.trust import (
     CommandTrustError,
@@ -20,8 +22,13 @@ class TestRunner(Runner):
 
     __test__ = False
 
-    def __init__(self, trust_mgr: CommandTrustManager | None = None) -> None:
+    def __init__(
+        self,
+        trust_mgr: CommandTrustManager | None = None,
+        sandbox_mgr: SandboxManager | None = None,
+    ) -> None:
         self.trust_mgr = trust_mgr or CommandTrustManager()
+        self.sandbox_mgr = sandbox_mgr
 
     @property
     def name(self) -> str:
@@ -140,17 +147,29 @@ class TestRunner(Runner):
         findings: list[Finding] = []
         safe_env = build_sanitized_subprocess_env(ctx.project_root)
         try:
-            res = subprocess.run(
-                cmd,
-                cwd=str(ctx.project_root),
-                env=safe_env,
-                capture_output=True,
-                text=True,
-                timeout=60,
-                shell=False,
-            )
-            if res.returncode != 0:
-                summary = res.stderr.strip() or res.stdout.strip()
+            if self.sandbox_mgr is not None:
+                sandbox_res = self.sandbox_mgr.run(cmd, ctx.project_root, custom_env=safe_env)
+                returncode = sandbox_res.exit_code
+                summary = (sandbox_res.stderr.strip() or sandbox_res.stdout.strip())
+                timed_out = sandbox_res.timed_out
+            else:
+                res = subprocess.run(
+                    cmd,
+                    cwd=str(ctx.project_root),
+                    env=safe_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    shell=False,
+                )
+                returncode = res.returncode
+                summary = (res.stderr.strip() or res.stdout.strip())
+                timed_out = False
+
+            if timed_out:
+                raise subprocess.TimeoutExpired(cmd, 60)
+
+            if returncode != 0:
                 last_lines = "\n".join(summary.splitlines()[-6:]) if summary else "Tests exited with error"
                 findings.append(
                     Finding(
@@ -175,6 +194,18 @@ class TestRunner(Runner):
                     recommendation="Ensure tests terminate promptly and do not hang waiting on external I/O.",
                     verifier=self.name,
                     fix_hint="Check for infinite loops or blocked network calls in test code.",
+                )
+            )
+        except SandboxError as e:
+            findings.append(
+                Finding(
+                    rule_id="UNI-TEST-001",
+                    severity=Severity.HIGH,
+                    file="tests",
+                    line=0,
+                    message=f"Sandbox isolation error: {e}",
+                    recommendation="Ensure sandbox environment and required OS capabilities are available.",
+                    verifier=self.name,
                 )
             )
         except Exception as e:
