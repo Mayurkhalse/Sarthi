@@ -48,8 +48,14 @@ class CgroupV2Manager:
 
     @classmethod
     def get_available_controllers(cls, root: Path | str = DEFAULT_CGROUP2_ROOT) -> set[str]:
-        """Returns the set of available resource controllers enabled at root."""
-        controllers_file = Path(root) / "cgroup.controllers"
+        """Returns the set of available resource controllers enabled at root or delegated parent."""
+        root_path = Path(root)
+        sarthi_dedicated = root_path / "sarthi"
+        controllers_file = (
+            sarthi_dedicated / "cgroup.controllers"
+            if (sarthi_dedicated.is_dir() and (sarthi_dedicated / "cgroup.controllers").is_file())
+            else root_path / "cgroup.controllers"
+        )
         if not controllers_file.is_file():
             return set()
         try:
@@ -82,7 +88,11 @@ class CgroupV2Manager:
         """Checks if current process has write permissions to create sub-cgroups in its delegated slice."""
         if not cls.is_available():
             return False
-        parent_dir = cls.get_current_process_cgroup_dir(root) or Path(root)
+        root_path = Path(root)
+        sarthi_dedicated = root_path / "sarthi"
+        if sarthi_dedicated.is_dir() and os.access(sarthi_dedicated, os.W_OK):
+            return True
+        parent_dir = cls.get_current_process_cgroup_dir(root) or root_path
         try:
             return os.access(parent_dir, os.W_OK)
         except Exception:
@@ -94,10 +104,24 @@ class CgroupV2Manager:
             raise SandboxCapabilityUnavailableError("cgroup v2 is not available on this host. Fail-closed.")
 
         self.cgroup_id = cgroup_id
-        parent_dir = self.get_current_process_cgroup_dir(self.cgroup_root) or self.cgroup_root
+
+        # Determine delegation parent directory:
+        # 1. Dedicated delegation directory /sys/fs/cgroup/sarthi if present and writable (avoids EBUSY)
+        # 2. Current process cgroup slice if writable
+        # 3. Root cgroup filesystem (/sys/fs/cgroup)
+        parent_dir: Path | None = None
+        sarthi_dedicated = self.cgroup_root / "sarthi"
+        if sarthi_dedicated.is_dir() and os.access(sarthi_dedicated, os.W_OK):
+            parent_dir = sarthi_dedicated
+        else:
+            proc_dir = self.get_current_process_cgroup_dir(self.cgroup_root)
+            if proc_dir and os.access(proc_dir, os.W_OK):
+                parent_dir = proc_dir
+            elif os.access(self.cgroup_root, os.W_OK):
+                parent_dir = self.cgroup_root
 
         # Verify parent directory is writable before attempting allocation
-        if not os.access(parent_dir, os.W_OK):
+        if not parent_dir or not os.access(parent_dir, os.W_OK):
             raise SandboxCapabilityUnavailableError(
                 f"cgroup v2 parent directory '{parent_dir}' is not writable by current user (delegation missing). Fail-closed."
             )
@@ -143,22 +167,30 @@ class CgroupV2Manager:
         # 1. Process ceiling: pids.max
         if max_processes is not None:
             pids_max_file = self.cgroup_path / "pids.max"
-            if pids_max_file.is_file():
-                try:
-                    pids_max_file.write_text(str(max_processes), encoding="utf-8")
-                except OSError as e:
-                    raise SandboxInitializationError(f"Failed to set cgroup v2 pids.max={max_processes}: {e}") from e
+            if not pids_max_file.is_file():
+                raise SandboxInitializationError(
+                    f"cgroup v2 pids.max controller is not available in '{self.cgroup_path}'. "
+                    "Parent cgroup must have +pids in cgroup.subtree_control. Fail-closed."
+                )
+            try:
+                pids_max_file.write_text(str(max_processes), encoding="utf-8")
+            except OSError as e:
+                raise SandboxInitializationError(f"Failed to set cgroup v2 pids.max={max_processes}: {e}") from e
 
         # 2. Hard memory cap: memory.max
         if max_memory_bytes is not None:
             mem_max_file = self.cgroup_path / "memory.max"
-            if mem_max_file.is_file():
-                try:
-                    mem_max_file.write_text(str(max_memory_bytes), encoding="utf-8")
-                except OSError as e:
-                    raise SandboxInitializationError(
-                        f"Failed to set cgroup v2 memory.max={max_memory_bytes}: {e}"
-                    ) from e
+            if not mem_max_file.is_file():
+                raise SandboxInitializationError(
+                    f"cgroup v2 memory.max controller is not available in '{self.cgroup_path}'. "
+                    "Parent cgroup must have +memory in cgroup.subtree_control. Fail-closed."
+                )
+            try:
+                mem_max_file.write_text(str(max_memory_bytes), encoding="utf-8")
+            except OSError as e:
+                raise SandboxInitializationError(
+                    f"Failed to set cgroup v2 memory.max={max_memory_bytes}: {e}"
+                ) from e
 
         # 3. Swap prevention: memory.swap.max = 0 (optional if swap controller enabled)
         swap_max_file = self.cgroup_path / "memory.swap.max"

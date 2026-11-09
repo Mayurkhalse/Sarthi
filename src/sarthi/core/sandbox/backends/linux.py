@@ -298,19 +298,20 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
                 mount_args.extend(["--ro-bind", p, p])
 
         # 2. Dynamic linkers & system alternatives
+        # Mount an isolated tmpfs on /etc to bind minimal system configs, then lock it down as read-only
+        mount_args.extend(["--tmpfs", "/etc"])
         for extra in ("/etc/ld.so.cache", "/etc/ld.so.conf.d", "/etc/alternatives"):
-            if os.path.isfile(extra):
-                mount_args.extend(["--dir", "/etc", "--ro-bind", extra, extra])
-            elif os.path.isdir(extra):
-                mount_args.extend(["--dir", extra, "--ro-bind", extra, extra])
+            if os.path.isfile(extra) or os.path.isdir(extra):
+                mount_args.extend(["--ro-bind", extra, extra])
 
         # 3. DNS / SSL certs if network is not blocked
         if policy.network != NetworkPolicy.BLOCKED:
             for net_meta in ("/etc/resolv.conf", "/etc/ssl", "/etc/pki", "/etc/ca-certificates"):
-                if os.path.isfile(net_meta):
-                    mount_args.extend(["--dir", str(Path(net_meta).parent), "--ro-bind", net_meta, net_meta])
-                elif os.path.isdir(net_meta):
-                    mount_args.extend(["--dir", net_meta, "--ro-bind", net_meta, net_meta])
+                if os.path.isfile(net_meta) or os.path.isdir(net_meta):
+                    mount_args.extend(["--ro-bind", net_meta, net_meta])
+
+        # Lock down /etc as immutable read-only to prevent tampering
+        mount_args.extend(["--remount-ro", "/etc"])
 
         # 4. Python runtime closure (interpreter, virtualenv, base prefixes, and real executable)
         ws_resolved = workspace_root.resolve()

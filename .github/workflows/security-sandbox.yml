@@ -41,16 +41,10 @@ jobs:
           # Enable controllers in root cgroup
           sudo bash -c "echo '+pids +memory' > /sys/fs/cgroup/cgroup.subtree_control" || true
 
-          # Identify runner's cgroup slice from /proc/self/cgroup
-          CGROUP_REL=$(grep '^0::' /proc/self/cgroup | cut -d: -f3 | sed 's|^/||')
-          echo "Runner cgroup relative path: $CGROUP_REL"
-
-          if [ -n "$CGROUP_REL" ] && [ -d "/sys/fs/cgroup/$CGROUP_REL" ]; then
-            RUNNER_CGROUP="/sys/fs/cgroup/$CGROUP_REL"
-            echo "Delegating runner cgroup: $RUNNER_CGROUP"
-            sudo chown -R runner:runner "$RUNNER_CGROUP" || true
-            sudo bash -c "echo '+pids +memory' > $RUNNER_CGROUP/cgroup.subtree_control" || true
-          fi
+          # Create dedicated /sys/fs/cgroup/sarthi delegation directory (zero internal processes, avoiding EBUSY)
+          sudo mkdir -p /sys/fs/cgroup/sarthi
+          sudo chown -R runner:runner /sys/fs/cgroup/sarthi
+          sudo bash -c "echo '+pids +memory' > /sys/fs/cgroup/sarthi/cgroup.subtree_control" || true
 
           # Ensure /sys/fs/cgroup root is delegated if runner executes at root level
           sudo chown runner:runner /sys/fs/cgroup || true
@@ -64,9 +58,15 @@ jobs:
           echo "=== User Namespace Test ==="
           bwrap --ro-bind /usr /usr --proc /proc --dev /dev --unshare-user -- true && echo "bwrap userns OK" || echo "bwrap userns FAILED"
           echo "=== Sandbox Python Test ==="
-          bwrap --ro-bind /usr /usr --proc /proc --dev /dev --unshare-user -- /usr/bin/python3 -c "import sys; print('Sandbox Python OK:', sys.version)" || echo "bwrap python FAILED"
-          echo "=== cgroup v2 Controllers ==="
+          bwrap --ro-bind /usr /usr --symlink usr/lib /lib --symlink usr/lib64 /lib64 --proc /proc --dev /dev --unshare-user -- /usr/bin/python3 -c "import sys; print('Sandbox Python OK:', sys.version)" || echo "bwrap python FAILED"
+          echo "=== cgroup v2 Root Controllers ==="
           cat /sys/fs/cgroup/cgroup.controllers || true
+          echo "=== cgroup v2 Root Subtree Control ==="
+          cat /sys/fs/cgroup/cgroup.subtree_control || true
+          echo "=== cgroup v2 Sarthi Controllers ==="
+          cat /sys/fs/cgroup/sarthi/cgroup.controllers || true
+          echo "=== cgroup v2 Sarthi Subtree Control ==="
+          cat /sys/fs/cgroup/sarthi/cgroup.subtree_control || true
           echo "=== Process cgroup ==="
           cat /proc/self/cgroup
 
