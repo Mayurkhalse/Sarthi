@@ -193,23 +193,39 @@ flowchart TD
 
 #### Detailed Windows Security Analysis & OS Enforcement Boundaries:
 
-1. **Filesystem Access and ACL Requirements:**
+1. **Filesystem Access and Ephemeral ACL Lifecycle:**
    - An AppContainer process executes with a unique AppContainer Security Identifier (SID format: `S-1-15-2-...`).
    - The Windows Security Reference Monitor (SRM) evaluates access tokens against object Discretionary Access Control Lists (DACLs).
    - Standard user profile directories (`C:\Users\<user>\*`, `.ssh`, `.aws`, other project directories) contain ACEs granting access to the User SID, `Administrators`, and `SYSTEM`. Because the AppContainer SID is not present in these DACLs and the token has the AppContainer restriction flag, access is kernel-denied with `STATUS_ACCESS_DENIED`.
    - **Crucial Limitation & Technical Reality:** AppContainer does **NOT** magically block access to every user file under every configuration. If a file, folder, or ancestor directory grants access to `Everyone` (SID `S-1-1-0`), `ALL APPLICATION PACKAGES` (SID `S-1-15-2-1`), or `ALL RESTRICTED APPLICATION PACKAGES` (SID `S-1-15-2-2`), the AppContainer token **CAN** access it. Sarthi must not assume files are protected if host permissions grant access to `Everyone`.
-   - **Workspace Access:** Because AppContainers have no default access to user files, the sandboxed process will fail to read or write its own project workspace unless Sarthi explicitly modifies the workspace root DACL. Sarthi must programmatically invoke `SetNamedSecurityInfoW` to append an Access Control Entry (ACE) granting `GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE` to the ephemeral AppContainer SID on the workspace root and an isolated scratch directory.
+   - **Strict Workspace DACL Scoping:**
+     - Sarthi **NEVER** modifies permissions or invokes `SetNamedSecurityInfoW` on the developer's original host repository.
+     - DACL modifications are applied **strictly and exclusively** to the ephemeral staged directory created by `WorkspaceStagingManager` (`%TEMP%\sarthi_staged_$UUID`).
+     - Sarthi programmatically invokes `SetNamedSecurityInfoW` to append an Access Control Entry (ACE) granting `GENERIC_ALL` (`CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE`) to the ephemeral AppContainer SID on the staged directory, and grants read-only access to the Python runtime directory.
+   - **Explicit 6-Step Teardown Sequence:**
+     Deleting an AppContainer profile does not prove filesystem ACEs are purged. Sarthi enforces an explicit teardown sequence:
+     1. Terminate the sandbox process and all descendants via the Job Object (`TerminateJobObject(hJob, 1)`).
+     2. Explicitly close all process, thread, job, and redirected pipe handles.
+     3. Remove AppContainer-specific ACEs from the staged directory DACL where applicable.
+     4. Verify the staged workspace directory can be completely purged from disk (`shutil.rmtree`).
+     5. Delete the ephemeral AppContainer profile via `DeleteAppContainerProfile(pszAppContainerName)`.
+     6. Verify cleanup results and log any residual artifacts. If cleanup fails, Sarthi raises `SandboxCleanupError` and preserves diagnostic evidence; cleanup failures are never silently ignored.
+     7. Interrupted Cleanups: Ephemeral profiles and staging folders reside in `%TEMP%` and are scrubbed during system reboot or via `sarthi doctor`.
 
 2. **Explicit Capabilities and Their Consequences:**
    - Capabilities are represented as well-known SIDs (e.g., `internetClient` `S-1-15-3-1`, `privateNetworkClientServer` `S-1-15-3-3`, `documentsLibrary` `S-1-15-3-2`).
    - Granting capabilities widens the attack surface.
    - **Sarthi Core Policy:** For verification commands, Sarthi configures **zero capabilities** (`CapabilityCount = 0`, `Capabilities = NULL`).
 
-3. **Network Access Restrictions:**
+3. **Network Access Restrictions & Independent Verification:**
    - Enforced by the Windows Filtering Platform (WFP) at the kernel network stack level.
-   - Without `internetClient`, all outbound WAN/Internet TCP/UDP connections are dropped.
-   - Without `privateNetworkClientServer`, all LAN/intranet connections are dropped.
-   - **Loopback Isolation:** Windows AppContainers are prohibited by default from communicating with `localhost` / `127.0.0.1`. Host databases (e.g. `localhost:5432`) and local services are completely unreachable without explicit loopback exemptions (`CheckNetIsolation.exe`). Sarthi never grants loopback exemptions.
+   - Sarthi does **NOT** claim that zero AppContainer capabilities automatically guarantee a universal WFP drop under all host environments (e.g., third-party firewalls, VPNs, or LSP filter drivers). Network isolation must be actively demonstrated.
+   - **Independent Network Verification Strategy:**
+     A failed socket connection alone is not proof of network isolation (a closed port produces `ECONNREFUSED`). Verification tests independent vectors using controlled test endpoints:
+     1. **Public WAN Connectivity:** Attempt connection to controlled public endpoint (e.g. DNS root `1.1.1.1:53`); must fail with policy denial (`WSAEACCES` / `WSAENETUNREACH`), distinguishing policy blocks from transient connection drops.
+     2. **Private LAN Connectivity:** Attempt connection to local gateway/subnet; must fail with `WSAEACCES`.
+     3. **Loopback (`127.0.0.1` / `::1`) Connectivity:** Windows AppContainers are prohibited by default from communicating with localhost. Sarthi never calls `CheckNetIsolation.exe LoopbackExempt`. Verification tests loopback against an **active, controlled test listener** spawned in the supervisor: uncontained processes connect successfully; AppContainer processes fail with `WSAEACCES`, proving active kernel WFP policy enforcement rather than the absence of a listener.
+     4. If policy-based denial cannot be demonstrated across all three vectors, Sarthi reports `network_isolation = UNSUPPORTED` and fails closed under strict policy.
 
 4. **Brokered Access vs. Raw Win32 Subprocesses:**
    - In UWP applications, access to user files outside the sandbox is mediated by runtime brokers (e.g., `runtimebroker.exe` via file pickers).
@@ -219,15 +235,32 @@ flowchart TD
    - Child processes spawned by an AppContainer process automatically inherit the parent's AppContainer token.
    - An AppContainer process lacks the privileges (`SeAssignPrimaryTokenPrivilege`, `SeIncreaseQuotaPrivilege`) necessary to create processes with different security tokens, preventing token escape via child process spawning.
 
-6. **GitHub Actions Runner Compatibility & Assumptions (`windows-latest`):**
+6. **GitHub Actions Runner Compatibility & Nested Job Objects (`windows-latest`):**
    - GitHub Actions `windows-latest` (Windows Server 2022/2025) executes jobs in ephemeral virtual machines under the `runneradmin` account.
    - AppContainer APIs (`CreateAppContainerProfile`, `DeleteAppContainerProfile`) in `userenv.dll` are fully supported on Windows Server 2022.
-   - The runner account possesses the necessary rights (`WRITE_DAC`) to adjust workspace ACLs.
-   - **Runner Trust Assumption:** Sarthi's automated Windows CI tests rely strictly on GitHub-hosted ephemeral virtual machine runners. If executed on persistent self-hosted runners, residual AppContainer profiles and registry keys (`HKCU\...\AppContainer\Mappings`) could persist across jobs unless explicitly purged.
+   - **Nested Job Object Restrictions:** GitHub Actions runner agents wrap job steps inside a Job Object. Windows Server 2022 supports nested Job Objects, provided the parent job permits breakaway (`JOB_OBJECT_LIMIT_BREAKAWAY_OK`). Sarthi actively probes Job Object assignment during capability detection. If `AssignProcessToJobObject` fails with `ERROR_ACCESS_DENIED` due to non-breakaway parent jobs, Sarthi flags `process_isolation = UNSUPPORTED` and fails closed under strict policy.
 
-7. **Process Creation Race & Handle Leakage Prevention:**
-   - **Race Mitigation:** Use `STARTUPINFOEXW` with `PROC_THREAD_ATTRIBUTE_JOB_LIST` to atomically place the new process into the Job Object upon creation, or create the process with `CREATE_SUSPENDED`, assign it to the Job Object via `AssignProcessToJobObject`, and resume with `ResumeThread`.
-   - **Handle Inheritance Mitigation:** Set `bInheritHandles = FALSE`. To redirect standard streams without leaking arbitrary parent handles, use `STARTUPINFOEXW` with `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, specifying only stdin, stdout, and stderr.
+7. **Synchronized Process Creation, Handle Inheritance & Memory Semantics:**
+   - **Race Mitigation (Suspended Process Spawning):** Spawning a process and assigning it to a Job Object afterward creates a race condition where untrusted code executes unconstrained before assignment. Sarthi enforces synchronized initialization:
+     1. Initialize Job Object `hJob` with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, `ActiveProcessLimit = 64`, and `JobMemoryLimit = 1GB`.
+     2. Invoke Win32 `CreateProcessW` directly via `ctypes` with flags `CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT`.
+     3. In `STARTUPINFOEXW`, provide `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` (AppContainer SID, 0 capabilities).
+     4. Provide `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` containing **only** the redirected `stdin`, `stdout`, and `stderr` pipe handles, preventing leakage of open parent handles.
+     5. Call `AssignProcessToJobObject(hJob, pi.hProcess)` while the process thread remains frozen.
+     6. Call `ResumeThread(pi.hThread)` to begin execution safely inside the Job Object.
+     7. Close thread handle `pi.hThread` immediately.
+   - **Platform-Specific Job Object Memory Semantics:**
+     - **Job Commit Limit vs. Physical RSS:** Win32 `JOBOBJECT_EXTENDED_LIMIT_INFORMATION.JobMemoryLimit` sets the **Job Commit Limit** (`JOB_OBJECT_LIMIT_JOB_MEMORY`). It restricts total virtual memory committed via `VirtualAlloc(MEM_COMMIT)` or stack/heap commit growth across all processes assigned to the Job Object.
+     - **Windows Commit Accounting Mechanics:**
+       - Committed memory is backed by system commit charge (RAM + pagefile).
+       - Address space reservations (`VirtualAlloc(MEM_RESERVE)`) without commit consume address space but zero bytes of commit quota.
+       - Memory pages swapped to `pagefile.sys` continue to count toward the job's commit charge until decommitted.
+       - When the job reaches `JobMemoryLimit`, subsequent `VirtualAlloc(MEM_COMMIT)` or dynamic stack/heap expansions fail with `ERROR_NOT_ENOUGH_MEMORY` / `ERROR_COMMITMENT_LIMIT`, protecting the host system from commit exhaustion.
+     - **Fundamental Differences from Linux cgroup v2 `memory.max`:**
+       - Linux cgroup v2 `memory.max` constrains aggregate physical resident memory (RSS anonymous pages + active/inactive page cache + kernel slab). It does not count unmapped or uncommitted virtual memory reservations.
+       - Disk swap on Linux is controlled separately via `memory.swap.max` (set to `0` by Sarthi), whereas Windows commit charge intrinsically incorporates pagefile backing.
+       - Reaching `memory.max` on Linux triggers kernel OOM termination (`memory.oom.group = 1`), whereas reaching `JobMemoryLimit` on Windows fails individual allocation calls or terminates processes depending on configured flags.
+     - **Non-Equivalence Invariant:** Sarthi explicitly documents these platform-specific accounting differences and **does not claim equivalent enforcement semantics across platforms**. Each platform backend enforces host resource protection using that platform's native kernel accounting abstractions.
 
 ---
 
@@ -271,30 +304,29 @@ STRICTLY EXCLUDED / BLOCKED (Not mounted in namespace):
    - **Merged-usr Handling:** On modern Linux distributions (systemd merged-usr), `/bin`, `/sbin`, and `/lib64` are symlinks to their `/usr` counterparts. Sarthi must use `bwrap --symlink usr/bin /bin` rather than attempting to bind-mount directories over existing symlinks, which would cause `bwrap` initialization to fail.
    - **Workspace Symlinks:** If an untrusted script creates a symlink targeting `/tmp/malicious` or `/usr/bin/python`, resolution is confined strictly to the sandbox's view of `/tmp` (ephemeral tmpfs) and `/usr` (read-only).
 
-2. **Hard-Link Isolation & Workspace Staging De-coupling:**
-   - **The Inode Inspection Fallacy:** Claiming that inspecting workspace file inode metadata (`stat.st_nlink > 1`) can determine whether hardlinks point outside the workspace is technically unviable. An inode link count only indicates that multiple directory entries point to that inode on the filesystem partition; it contains no reverse mapping to path locations. Determining whether a hard link resides outside the workspace would require an exhaustive filesystem walk across the entire volume, which is prohibitive in latency, permission-blocked, and vulnerable to race conditions.
+2. **Hard-Link Isolation, Workspace Staging De-coupling, and Filesystem Boundaries:**
+   - **Crucial Architectural Distinction: Filesystem Staging vs. Filesystem Isolation:**
+     - **Filesystem Staging (`WorkspaceStagingManager`)** is an *application-level data decoupling pipeline*. It copies files by value to fresh destination inodes, severing hardlink links to host files, and validates that internal symlinks and special files (FIFOs, sockets) do not escape. **Staging alone provides ZERO OS path isolation**: an uncontained process running inside a staged directory can still read `/etc/shadow` or `C:\Users` via absolute paths!
+     - **Filesystem Isolation (`LinuxBubblewrapBackend` / `WindowsAppContainerBackend`)** is the *OS kernel-enforced access boundary*. Mount namespaces ensure sensitive host paths (`/home`, `/root`) do not exist in the namespace mount table; AppContainer SRM tokens ensure access checks fail with `STATUS_ACCESS_DENIED`.
+     - Sarthi mandates **both**: staging severs inode and hardlink relationships; isolation prevents kernel syscall escapes.
    - **Defensible Isolation Mechanism: Clean Staged Copying:**
-     To guarantee complete hardlink de-coupling, Sarthi implements an isolated workspace staging pipeline before sandbox mounting:
-     - **Fresh Inode Allocation via Regular File Copying:** Sarthi stages the repository into an isolated directory tree (or private ephemeral `tmpfs`). Regular files are copied by value (e.g. standard content copy via `shutil.copy2` with `follow_symlinks=False` without preserving hardlink relationships). Each copied regular file allocates a fresh, independent inode on the destination filesystem, completely severing any hardlink relationship to host inodes outside the workspace.
+     - **Fresh Inode Allocation via Regular File Copying:** Sarthi stages the repository into an isolated directory tree (or private ephemeral `tmpfs`). Regular files are copied by value (`shutil.copy2` with `follow_symlinks=False`). Each regular file allocates a fresh inode, completely severing any hardlink relationship to host inodes outside the workspace.
      - **Symlink Traversal Prevention & Chained Symlinks:**
-       - Sarthi inspects each symlink during staging.
        - The canonical resolved target (`os.path.realpath`) is evaluated to ensure it does not escape the workspace boundary.
        - Chained symlinks (`a -> b -> c`) are resolved iteratively against the staging boundary.
-       - Any symlink with an absolute target or a target resolving outside the workspace boundary is rejected or neutralized (fail-closed).
-     - **Special Inode Type Validation:** If the repository contains FIFOs (`stat.S_ISFIFO`), UNIX domain sockets (`stat.S_ISSOCK`), character devices (`stat.S_ISCHR`), or block devices (`stat.S_ISBLK`), staging immediately **aborts and fails closed** (`StagedWorkspaceSecurityError`). Sarthi never copies or stages special device nodes or IPC sockets.
-     - **Staging Failure Handling & Cleanup:** If staging encounters disk quota limits, permission denials, illegal inode types, or cyclic directories, staging halts immediately, all partial staging files are purged via `shutil.rmtree()`, and Sarthi raises a fail-closed exception (`SandboxStagingError`). Sarthi **NEVER** falls back to mounting the original unstaged host workspace.
-   - **Fresh Directory Tree vs. Independently Isolated Filesystem:**
-     - Staging into a *fresh directory tree on the same volume* guarantees independent inode allocation for regular files (eliminating hardlink sharing), but still shares filesystem capacity and volume-level limits.
-     - Staging into an *independently isolated filesystem* (such as a private `tmpfs` mount) additionally enforces strict quota boundaries and separate mount flags (`nosuid, nodev`).
-   - **Remaining Limitations & Performance Trade-offs:**
-     - Copying repository files introduces storage and I/O overhead proportional to the repository size.
-     - Where supported by the underlying filesystem (e.g. Btrfs, XFS with reflink, APFS), Sarthi can use Copy-on-Write (CoW / `reflink`) to duplicate directory trees efficiently without copying physical blocks; however, where reflink is unavailable, standard byte copies are required.
-     - For very large workspaces (e.g. hundreds of thousands of files or tens of gigabytes), staging latency may require caching or scoped sub-tree staging.
+       - Any symlink with an absolute target or resolving outside the workspace boundary is rejected fail-closed (`StagedWorkspaceSecurityError`).
+     - **Special Inode Type Validation:** If the repository contains FIFOs (`stat.S_ISFIFO`), UNIX domain sockets (`stat.S_ISSOCK`), character devices (`stat.S_ISCHR`), or block devices (`stat.S_ISBLK`), staging immediately **aborts and fails closed** (`StagedWorkspaceSecurityError`).
+     - **Staging Failure Handling & Cleanup:** If staging encounters quota limits, permission denials, or cyclic directories, all partial files are purged immediately via `shutil.rmtree()`, raising a fail-closed `SandboxStagingError`. Sarthi **NEVER** falls back to mounting the unstaged host workspace.
 
-3. **Runtime Mount Discovery & Dynamic Library Dependencies:**
-   - Python C-extensions (e.g. `pydantic_core`, `cryptography`, `psycopg2`) rely on dynamic shared libraries (`.so`).
-   - The dynamic linker (`ld.so`) requires `/etc/ld.so.cache` to resolve library dependencies efficiently. If `/etc/ld.so.cache` is omitted, library lookups fall back to scanning default search paths or fail entirely.
-   - Sarthi programmatically inspects `sys.executable`, `sys.prefix`, and `sys.base_prefix` to determine the paths required for the standard library, base interpreter, and virtual environment, mounting each as read-only.
+3. **Complete Runtime Dependency Closure Discovery (Python & Node.js):**
+   - Python C-extensions (`pydantic_core`, `cryptography`, `psycopg2`) and Node.js runtimes rely on dynamic shared libraries (`.so`) and virtual environment symlinks.
+   - Simply mounting `/usr` and `/lib` is insufficient when runtimes reside under `pyenv`, `asdf`, `.venv`, or `nvm`.
+   - Sarthi dynamically calculates the full dependency closure:
+     1. **Base Python Interpreter:** Resolves `os.path.realpath(sys.executable)` to locate and mount the real binary and parent directory read-only.
+     2. **Base Standard Library:** Mounts `sys.base_prefix` read-only.
+     3. **Virtual Environment:** Mounts `sys.prefix` read-only (if outside the staged workspace).
+     4. **Dynamic Linker Cache:** Mounts `/etc/ld.so.cache`, `/etc/ld.so.conf.d`, and `/etc/alternatives` read-only.
+     5. **Node.js Environment:** When JavaScript/TypeScript stacks are active, resolves `shutil.which("node")` and mounts the canonical target, its dynamic libraries (`libstdc++.so`, `libuv.so`), and global npm/pnpm modules read-only.
 
 4. **Python Virtual Environments:**
    - Virtual environments (`.venv/bin/python`) typically contain symlinks pointing to the system interpreter (e.g. `/usr/bin/python3.11`) and rely on `pyvenv.cfg`.
@@ -308,37 +340,74 @@ STRICTLY EXCLUDED / BLOCKED (Not mounted in namespace):
    - **Abstract UNIX Domain Sockets:** Linux network namespaces (`--unshare-net`) isolate abstract UNIX sockets (sockets beginning with a null byte `\0`). With `--unshare-net`, host abstract sockets are completely unreachable.
    - **Filesystem-based UNIX Sockets:** Sockets residing on the filesystem (e.g., `/var/run/docker.sock`, `/tmp/.X11-unix`, ssh-agent sockets in `/run/user/...`) are blocked because `/run` and `/var` are omitted entirely, and `/tmp` is mounted as a fresh, private in-memory `tmpfs`.
 
-7. **Inherited File Descriptors & Bubblewrap Descriptor Controls:**
-   - **Verification of Bubblewrap Descriptor Arguments:** Bubblewrap does **NOT** provide a generic `--close-fd` flag. Invoking `bwrap --close-fd` results in an immediate failure (`bwrap: Unknown option --close-fd`).
-   - **Bubblewrap's Actual Supported Descriptor Options:** Bubblewrap only accepts specific FD-related arguments:
-     - `--json-status-fd FD`: Transmit structured JSON status events.
-     - `--file FD DEST`: Stream data from an open FD into a file at `DEST` inside the container.
-     - `--bind-data FD DEST` and `--ro-bind-data FD DEST`: Bind-mount data from an open FD.
-     - `--seccomp FD`: Load a compiled BPF seccomp filter program from an open FD.
-     - `--info-fd FD`: Write the sandbox PID to an open FD.
-     - `--userns-block-fd FD` and `--sync-fd FD`: Internal synchronization barriers.
-     Bubblewrap relies entirely on the caller (the parent process) to manage descriptor inheritance prior to `execve`.
-   - **Python Subprocess Contract vs. CPython Implementation:**
-     - At the Python API level, `subprocess.Popen(..., close_fds=True)` guarantees that all file descriptors greater than 2 (`stdin=0, stdout=1, stderr=2`) except those explicitly passed in `pass_fds` are closed before the child process image is executed (`execve`).
-     - This guarantee is defined by Python's standard library specification, independent of whether the underlying CPython implementation uses `close_range()`, `/proc/self/fd` iteration, or `sysconf(_SC_OPEN_MAX)`.
-     - Any descriptor intentionally required by Bubblewrap (such as `--info-fd` or `--seccomp`) must be explicitly included in `pass_fds`; otherwise, Python's `close_fds=True` will close it before `execve("bwrap", ...)`.
-   - **Standard Stream Redirection & Hijacking Prevention:**
-     - Sarthi explicitly redirects `stdin` to `subprocess.DEVNULL` (preventing child input hijacking), and redirects `stdout` and `stderr` to isolated pipes managed by Sarthi (`subprocess.PIPE`). Standard streams are never connected directly to host terminal handles or daemon sockets.
-   - **Preventing Leakage Through Wrapper Scripts:**
-     - Sarthi invokes `bwrap` directly as an argument vector (`argv` list), strictly prohibiting intermediate shell wrappers (`shell=False`).
-     - Sarthi marks all internal file descriptors (log handles, DB connections, IPC sockets) with the `FD_CLOEXEC` flag (`fcntl.FD_CLOEXEC` / `os.O_CLOEXEC`) immediately upon opening in the host process.
-   - **Remaining Limitations:**
-     - If third-party C-extensions running inside the Sarthi Python host process spawn threads or open file descriptors without `O_CLOEXEC` concurrently during process execution, thread-fork descriptor races can theoretically occur. Sarthi mitigates this by keeping internal worker threads quiescent during subprocess dispatch.
+7. **Process Lifecycle, Thread-Safe Sessions, and Process-Tree Termination:**
+   - **Thread-Safe Session Initialization:** Using `preexec_fn=os.setsid` is strictly prohibited because invoking Python bytecode between `fork` and `execve` causes deadlocks in multi-threaded processes. Sarthi strictly uses `subprocess.Popen(..., start_new_session=True)` to create an independent process group in a C-runtime thread-safe manner.
+   - **Parent-Death Handling (`--die-with-parent`):** Bubblewrap is passed `--die-with-parent`, utilizing `prctl(PR_SET_PDEATHSIG, SIGKILL)` so that if the Sarthi supervisor dies, the kernel terminates the sandbox immediately.
+   - **Process-Tree Termination & Reaping:** Because `start_new_session=True` sets `PGID == child.pid`, termination sends `os.killpg(child.pid, signal.SIGTERM)`, waits for a grace period (2.0s), and follows with `os.killpg(child.pid, signal.SIGKILL)`. Inside `bwrap --unshare-pid`, Bubblewrap acts as PID 1 of the PID namespace, reaping child zombies and terminating all namespace processes when PID 1 exits.
 
 8. **Host Resource Exposure:**
    - `/proc`: Must be mounted as a private virtual procfs via `bwrap --proc /proc` in a dedicated PID namespace (`--unshare-pid`). Host `/proc` must never be bind-mounted.
    - `/sys`: Must not be mounted, preventing inspection of hardware or kernel tunable parameters.
    - `/dev`: Must be initialized via `bwrap --dev /dev` to provide only minimal device nodes (`/dev/null`, `/dev/zero`, `/dev/urandom`).
 
-9. **Namespace Requirements & Kernel Settings:**
+9. **Namespace Requirements & Active Capability Probing:**
    - Bubblewrap requires unprivileged user namespaces (`CLONE_NEWUSER`).
-   - On kernels where unprivileged user namespaces are restricted (e.g., Debian/Ubuntu with `sysctl kernel.unprivileged_userns_clone=0` or Ubuntu 24.04 AppArmor restrictions), unprivileged bubblewrap will fail.
-   - Sarthi detects user namespace availability during initialization; if unsupported, Sarthi reports `CapabilityStatus.UNSUPPORTED` and fails closed.
+   - Passive inspection of `sysctl` is insufficient because it misses AppArmor restrictions (e.g. Ubuntu 24.04 `kernel.apparmor_restrict_unprivileged_userns=1`) and missing binary capabilities.
+   - Sarthi executes an **active probe** during `detect_capabilities()`:
+     ```bash
+     bwrap --ro-bind /usr /usr --proc /proc --dev /dev --unshare-user --unshare-pid --unshare-net -- true
+     ```
+   - If the active probe fails, Sarthi parses stderr (`"permission denied"`, `"setting up uid map"`) to record exact diagnostic traces, flags `CapabilityStatus.UNSUPPORTED`, and fails closed under strict policy.
+
+10. **Resource Enforcement: cgroup v2 Architecture vs. RLIMIT Fallacies:**
+    - **Critique of RLIMIT Primitives:**
+      - **`RLIMIT_NPROC` Fallacy:** `RLIMIT_NPROC` limits process count across the **entire real UID**, not just the sandbox. Setting `RLIMIT_NPROC=64` fails immediately if the host user owns 70 processes (IDE, shells), and a sandboxed fork bomb can exhaust the quota for host tasks. Furthermore, PID namespaces (`--unshare-pid`) provide process visibility and isolation, **not a process ceiling**; a process inside a PID namespace can still fork bomb until system resources exhaust.
+      - **`RLIMIT_AS` Fallacy:** `RLIMIT_AS` limits virtual address space (`mmap`), not physical memory. V8, PyTorch, and Python 3.13 pre-allocate gigabytes of sparse address space, triggering false `MemoryError` crashes on benign scripts under a 1GB cap. Conversely, `RLIMIT_AS` does not constrain multi-process aggregate memory.
+    - **The cgroup v2 Enforcement Standard:**
+      - Where available, Sarthi provisions a dedicated, ephemeral cgroup under the user's delegated slice: `/sys/fs/cgroup/user.slice/.../sarthi-sandbox-$UUID/`.
+      - **`pids.max`**: Set strictly to policy ceiling (e.g., `64`), capping aggregate processes in the subtree.
+      - **`memory.max`**: Set strictly to policy limit (e.g., `1073741824` for 1GB), enforcing aggregate physical and kernel page limits.
+      - **`memory.swap.max = 0`**: Prevents untrusted processes from swapping data to host disk when supported and writable.
+      - **`memory.oom.group = 1`**: Instructs the Linux kernel to treat the sandboxed cgroup as an atomic unit, killing the entire sandbox workload upon OOM rather than a single random worker thread.
+    - **Race-Free Process Creation into cgroup v2:**
+      - **Prohibition of Asynchronous Process Migration:** Spawning an unconstrained process (e.g. via standard `subprocess.Popen`) and writing its PID to `cgroup.procs` asynchronously afterward is **strictly prohibited**. In an asynchronous model, untrusted code begins executing immediately upon `execve` on the host scheduler without resource limits; an adversarial child can execute a fork bomb, allocate multi-gigabyte heap structures, or spawn detached worker threads before the supervisor's thread can open and write to `cgroup.procs`.
+      - **Primary Mechanism: `clone3(CLONE_INTO_CGROUP)` (Linux 5.7+):**
+        - Linux kernel 5.7 introduced `CLONE_INTO_CGROUP` support for the `clone3()` system call.
+        - Sarthi opens the dedicated ephemeral cgroup directory (`open("/sys/fs/cgroup/.../sarthi-sandbox-$UUID", O_RDONLY | O_DIRECTORY | O_CLOEXEC)`), yielding file descriptor `cgroup_fd`.
+        - When spawning the sandbox child, Sarthi invokes `clone3()` passing `struct clone_args` populated with `flags = CLONE_INTO_CGROUP` and `cgroup = cgroup_fd`.
+        - The Linux kernel atomically places the newly created child process directly into the designated target cgroup at birth before the child executes any instruction. The child process is born constrained by `pids.max` and `memory.max`, eliminating the process migration race window entirely.
+      - **Safe Fork-and-Stop Synchronization Fallback (Pre-5.7 Kernels / Missing `clone3` Support):**
+        - On kernels older than 5.7, or in containerized/virtualized environments where `clone3` is intercepted or yields `ENOSYS`, `clone3(CLONE_INTO_CGROUP)` is unavailable.
+        - Sarthi enforces a synchronized fork-and-stop barrier using an internal unidirectional pipe (`sync_pipe`) before launching Bubblewrap or untrusted code:
+          1. The supervisor creates an anonymous pipe with `O_CLOEXEC`: `pipe(sync_pipe_fds)`.
+          2. The child process is forked. Before executing `execve` or any untrusted logic, the child immediately blocks on a synchronous read: `os.read(sync_pipe_fds[0], 1)`.
+          3. The parent supervisor observes the child's PID, writes the PID string to `/sys/fs/cgroup/.../sarthi-sandbox-$UUID/cgroup.procs`, and reads back `cgroup.procs` (verifying the child PID is registered as a member of the cgroup).
+          4. Upon successful attachment verification, the supervisor writes a single authorization byte (`b"\x01"`) into `sync_pipe_fds[1]`.
+          5. The child receives the authorization byte, closes `sync_pipe_fds[0]`, and executes `os.execve` with the `bwrap` command line.
+          6. If cgroup attachment fails (e.g., cgroup migration denied or PID invalid), the supervisor closes the pipe without sending authorization and kills the child (`SIGKILL`). The child reads EOF (`0` bytes) from the pipe and immediately calls `os._exit(1)`, guaranteeing unconstrained code never executes.
+      - **Platform/Kernel Compatibility & Fail-Closed Behavior:**
+        - If cgroup v2 controllers (`pids`, `memory`) cannot be written, or if neither `clone3(CLONE_INTO_CGROUP)` nor the synchronization pipe barrier can attach the child process prior to execution, Sarthi reports `resource_enforcement = UNSUPPORTED` and `process_count_enforcement = UNSUPPORTED`.
+        - Sarthi does **NOT** claim PID namespaces prevent fork bombs. Under `SandboxPolicy.default_strict()`, missing or un-attachable cgroup v2 resource controllers causes execution to **fail closed** (`SandboxCapabilityUnavailableError`).
+    - **cgroup v2 Lifecycle, Termination & Emptiness-Verified Cleanup:**
+      - **Atomic Termination via `cgroup.kill` (Linux 5.14+):**
+        - Linux kernel 5.14 introduced `/sys/fs/cgroup/.../cgroup.kill`.
+        - Writing `1` into `cgroup.kill` causes the kernel to atomically deliver `SIGKILL` to all processes currently residing in that cgroup and all of its descendants in a single atomic operation. This eliminates userspace races where rapid fork bombs spawn new children faster than a userspace loop can iterate over `cgroup.procs` and send signals.
+        - On pre-5.14 kernels: Sarthi reads `cgroup.procs`, sends `SIGKILL` to each PID, and loops until `cgroup.procs` is empty or until a drain timeout occurs.
+      - **Emptiness Verification Before Directory Removal:**
+        - Attempting to call `rmdir()` on a cgroup that still contains alive or un-reaped processes fails with `EBUSY`.
+        - Before invoking `rmdir()`, the supervisor polls `cgroup.events` verifying that `populated 0` is reported (or polls `cgroup.procs` verifying 0 entries) within a bounded drain timeout (2.0s).
+        - Only after confirming emptiness does the supervisor call `os.rmdir()` on the ephemeral directory `/sys/fs/cgroup/.../sarthi-sandbox-$UUID`.
+      - **Supervisor & Host Process Isolation Invariants:**
+        - The supervisor strictly verifies that its own PID (`os.getpid()`) is NOT a member of the sandbox cgroup before triggering kill or cleanup.
+        - The supervisor executes in its own distinct slice/scope (e.g., `/sys/fs/cgroup/user.slice/.../sarthi-supervisor.slice/` or parent cgroup).
+        - The target path must strictly validate against the ephemeral sandbox prefix (`sarthi-sandbox-` + valid UUID) within the user's delegated slice.
+        - Sarthi **never** issues kill signals or invokes `rmdir()` on root cgroups (`/sys/fs/cgroup`), system slices, or top-level user slices (`/sys/fs/cgroup/user.slice`).
+      - **Failure Handling When Cleanup Cannot Complete:**
+        - If processes remain alive past the drain timeout (e.g., stuck in `TASK_UNINTERRUPTIBLE` / `D` state awaiting unresponsive I/O) or if `rmdir()` fails with `EBUSY` or `EPERM`:
+          - Sarthi raises `SandboxCleanupError`.
+          - Residual PIDs and the unremoved cgroup path are logged to diagnostic error traces.
+          - The capability report records `cleanup_successful = False` with full diagnostic evidence.
+          - Cleanup failures are never silently suppressed. The unremoved cgroup is recorded for subsequent cleanup via `sarthi doctor`.
 
 ---
 
@@ -360,21 +429,36 @@ The previous architectural draft classified macOS `sandbox-exec` as "Feasibility
 
 ---
 
-## 4. Multi-Dimensional Capability Assessment Matrix
+## 4. Multi-Dimensional Capability Assessment Matrix & Certification Lifecycle
 
-A single binary status or `isolation_level` string is insufficient to represent OS-enforced isolation. Sarthi establishes a rigorous capability model separating **enforcement status** from **mechanism maturity**:
+A single binary status or `isolation_level` string is insufficient to represent OS-enforced isolation. Sarthi establishes a rigorous capability model separating **enforcement status**, **mechanism maturity**, and **certification lifecycle tier**:
 
-### Enforcement Statuses:
-- **`PASS`**: The capability is actively enforced by verified, supported OS kernel primitives and validated by passing adversarial tests in CI.
+### 1. Enforcement Statuses:
+- **`PASS`**: The capability is actively enforced by verified, supported OS kernel primitives and validated by passing automated adversarial tests in CI.
 - **`FAIL`**: The capability was requested, but kernel enforcement failed or allowed an unauthorized action.
-- **`UNSUPPORTED`**: The host operating system lacks the necessary primitives, or required kernel features (e.g. unprivileged user namespaces) are disabled.
-- **`NOT_VERIFIED`**: The mechanism initialized, but independent adversarial CI verification has not confirmed enforcement.
+- **`UNSUPPORTED`**: The host operating system lacks the necessary primitives, or required kernel features (e.g. unprivileged user namespaces, cgroup v2 controllers) are disabled or un-delegated.
+- **`UNVERIFIED`**: The capability is specified or implemented, but automated adversarial CI verification has not yet executed or confirmed kernel-level enforcement.
 
-### Mechanism Maturity Levels:
-- **`PRODUCTION`**: Supported, documented, non-deprecated OS kernel primitive (e.g. Linux Bubblewrap / User Namespaces, Windows AppContainer).
-- **`EXPERIMENTAL`**: Functional implementation undergoing validation.
+### 2. Mechanism Maturity Levels:
+- **`IMPLEMENTATION_PENDING`**: Architecture and interface specified; backend implementation is pending or in progress.
+- **`PRODUCTION`**: Supported, documented, non-deprecated OS kernel primitive (e.g. Linux Bubblewrap / cgroup v2, Windows AppContainer / Job Objects) after full implementation and verification.
+- **`EXPERIMENTAL`**: Functional implementation undergoing active validation.
 - **`DEPRECATED`**: Mechanism is functional but officially deprecated by the OS vendor (e.g. macOS `sandbox-exec`). **A deprecated mechanism must NEVER receive production certification PASS merely because it successfully initializes.**
-- **`LEGACY_UNSUPPORTED`**: Outdated or insecure mechanism.
+- **`LEGACY_UNSUPPORTED`**: Outdated or insecure mechanism (e.g. null backend).
+
+### 3. Four-Tier Certification Lifecycle:
+To prevent labeling unverified or incomplete code as secure, Sarthi establishes four explicit certification tiers:
+1. **`IMPLEMENTATION_PENDING`**: Architectural specification and threat model complete; implementation in progress.
+2. **`CAPABILITY_AVAILABLE_UNVERIFIED`**: Backend implementation and active capability probe succeed on host, but automated CI and adversarial verification suites have not executed.
+3. **`CI_VERIFIED`**: Automated CI test suite passes functional tests on the target platform runner (`ubuntu-latest` / `windows-latest`).
+4. **`PRODUCTION_CERTIFIED`**: All mandatory security capabilities (`filesystem_isolation`, `network_isolation`, `process_isolation`, `process_count_enforcement`, `resource_enforcement`, `workspace_confinement`, `child_process_inheritance`) actively evaluate to `PASS`, AND all required CI adversarial penetration tests have proven kernel-level boundaries without regressions.
+
+#### Strict Certification Transition Criteria:
+* **Documentation Rule:** Architecture documentation alone cannot establish production certification.
+* **Probing Rule:** A successful capability probe establishes availability (`CAPABILITY_AVAILABLE_UNVERIFIED`), not security certification.
+* **CI Verification Rule:** CI must verify actual runtime sandbox behavior on ephemeral virtual machines.
+* **Adversarial Rule:** Adversarial penetration tests must prove that breakout, network egress, loopback access, and resource exhaustion attempts are blocked by the OS kernel.
+* **Fail-Closed Invariant:** Unsupported capabilities must never be silently treated as passing; any missing mandatory capability immediately fails closed under `SandboxPolicy.default_strict()`.
 
 ```python
 from enum import Enum
@@ -384,36 +468,49 @@ class CapabilityStatus(str, Enum):
     PASS = "PASS"
     FAIL = "FAIL"
     UNSUPPORTED = "UNSUPPORTED"
-    NOT_VERIFIED = "NOT_VERIFIED"
+    UNVERIFIED = "UNVERIFIED"
 
 class MechanismMaturity(str, Enum):
+    IMPLEMENTATION_PENDING = "IMPLEMENTATION_PENDING"
     PRODUCTION = "PRODUCTION"
     EXPERIMENTAL = "EXPERIMENTAL"
     DEPRECATED = "DEPRECATED"
     LEGACY_UNSUPPORTED = "LEGACY_UNSUPPORTED"
 
+class CertificationTier(str, Enum):
+    IMPLEMENTATION_PENDING = "IMPLEMENTATION_PENDING"
+    CAPABILITY_AVAILABLE_UNVERIFIED = "CAPABILITY_AVAILABLE_UNVERIFIED"
+    CI_VERIFIED = "CI_VERIFIED"
+    PRODUCTION_CERTIFIED = "PRODUCTION_CERTIFIED"
+
 @dataclass(frozen=True)
 class SandboxCapabilityReport:
     backend_name: str
     mechanism_maturity: MechanismMaturity
+    certification_tier: CertificationTier
     filesystem_isolation: CapabilityStatus
     network_isolation: CapabilityStatus
     process_isolation: CapabilityStatus
-    environment_isolation: CapabilityStatus
+    process_count_enforcement: CapabilityStatus
     resource_enforcement: CapabilityStatus
+    environment_isolation: CapabilityStatus
     workspace_confinement: CapabilityStatus
     child_process_inheritance: CapabilityStatus
     evidence_trace: list[str] = field(default_factory=list)
 
     @property
     def is_production_certified(self) -> bool:
-        """Returns True ONLY if all required capabilities PASS under a PRODUCTION mechanism."""
+        """Returns True ONLY if all required capabilities PASS under a PRODUCTION mechanism and certified tier."""
         if self.mechanism_maturity != MechanismMaturity.PRODUCTION:
+            return False
+        if self.certification_tier != CertificationTier.PRODUCTION_CERTIFIED:
             return False
         return (
             self.filesystem_isolation == CapabilityStatus.PASS
             and self.network_isolation == CapabilityStatus.PASS
             and self.process_isolation == CapabilityStatus.PASS
+            and self.process_count_enforcement == CapabilityStatus.PASS
+            and self.resource_enforcement == CapabilityStatus.PASS
             and self.workspace_confinement == CapabilityStatus.PASS
             and self.child_process_inheritance == CapabilityStatus.PASS
         )
@@ -426,12 +523,39 @@ An enforcement status of `PASS` is awarded **only** when supported by reproducib
 | Capability Dimension | Required CI Adversarial Evidence for `PASS` |
 |---|---|
 | **Filesystem Isolation** | Child process attempts to `open()` `/etc/shadow`, `~/.ssh/id_rsa`, `~/.aws/credentials`, and user files outside the workspace. Must raise `PermissionError` / `FileNotFoundError` (Linux `ENOENT`, Windows `ERROR_ACCESS_DENIED`). |
-| **Network Isolation** | Child process attempts `socket.connect()` to internet IP (e.g. `8.8.8.8:53`), LAN IP, and `127.0.0.1:5432`. Must fail with `OSError: Network is unreachable` or `WSAEACCES`. |
+| **Network Isolation** | Evaluated via independent controlled endpoints:<br>• **WAN**: Connection to controlled endpoint fails with policy error (`WSAEACCES` / `ENETUNREACH`).<br>• **LAN**: Connection to local subnet fails with `WSAEACCES` / `ENETUNREACH`.<br>• **Loopback**: Connection to active supervisor test listener on `127.0.0.1` fails with `WSAEACCES` / `ECONNREFUSED` (distinguishing policy denial from absent listener). |
 | **Process Isolation** | Child process attempts `os.kill(parent_pid, 0)` or enumerates `/proc` / `EnumProcesses`. Must see only itself / sandbox PIDs. |
+| **Process-Count Enforcement** | Child process executes recursive fork bomb. On Linux: cgroup v2 `pids.max` triggers `EAGAIN` on process creation. On Windows: Job Object `ActiveProcessLimit` blocks process spawn with `ERROR_NOT_ENOUGH_QUOTA` or `ERROR_ACCESS_DENIED`. |
+| **Resource Enforcement** | Child process attempts allocating 2GB of physical RAM. On Linux: cgroup v2 `memory.max` triggers atomic cgroup OOM termination (`memory.oom.group = 1`). On Windows: Job Object `JobMemoryLimit` terminates the workload. |
 | **Environment Isolation** | Child process environment dictionary contains zero un-allowlisted host environment variables. |
-| **Resource Enforcement** | Child process attempting memory allocation beyond policy limit is terminated by OS kernel (`RLIMIT_AS` or Job Object commit limit). |
 | **Workspace Confinement** | Child process read and write within `workspace_root` succeeds; write attempt outside `workspace_root` raises `PermissionError` / `ERROR_ACCESS_DENIED`. |
 | **Child-Process Inheritance** | Process spawned by the child process attempts network connection and external filesystem read; must be blocked identically. |
+
+### Capability & Fallback Matrix:
+
+#### Table 4.1: Current Implementation & Verification Status (Current Codebase Reality — SEC-01C.1)
+
+The following matrix records the **actual, verified status** in the repository today. Premature `PASS` or `PRODUCTION` labels are strictly prohibited for unwritten or unverified backends:
+
+| Platform & Backend | Current Mechanism Maturity | Current Certification Tier | Filesystem Isolation | Network Isolation | Process Isolation | Process-Count Enforcement | Resource Enforcement | Production Certified |
+|---|---|---|---|---|---|---|---|---|
+| **Linux (bwrap + cgroup v2)** | `IMPLEMENTATION_PENDING` | `IMPLEMENTATION_PENDING` | `UNVERIFIED` | `UNVERIFIED` | `UNVERIFIED` | `UNVERIFIED` | `UNVERIFIED` | ❌ **NO** |
+| **Linux (bwrap, no cgroup v2)**| `IMPLEMENTATION_PENDING` | `IMPLEMENTATION_PENDING` | `UNVERIFIED` | `UNVERIFIED` | `UNVERIFIED` | `UNSUPPORTED` | `UNSUPPORTED` | ❌ **NO** |
+| **Windows (AppContainer + Job)**| `IMPLEMENTATION_PENDING` | `IMPLEMENTATION_PENDING` | `UNVERIFIED` | `UNVERIFIED` | `UNVERIFIED` | `UNVERIFIED` | `UNVERIFIED` | ❌ **NO** |
+| **Windows (Legacy / No AppContainer)**| `LEGACY_UNSUPPORTED` | `IMPLEMENTATION_PENDING` | `UNSUPPORTED` | `UNSUPPORTED` | `UNSUPPORTED` | `UNSUPPORTED` | `UNSUPPORTED` | ❌ **NO** |
+| **macOS (Seatbelt `sandbox-exec`)**| `DEPRECATED` | `IMPLEMENTATION_PENDING` | `UNVERIFIED` | `UNVERIFIED` | `UNSUPPORTED` | `UNSUPPORTED` | `UNSUPPORTED` | ❌ **NO** (Deprecation Policy) |
+
+#### Table 4.2: Target Architectural Capability Gates & Exit Criteria (Post-Implementation & CI Verification)
+
+The following matrix defines the **mandatory target gates** that backends must satisfy to exit development milestones (SEC-01C.3 through SEC-01C.6). Production certification is awarded strictly after CI adversarial tests verify these boundaries:
+
+| Target Platform & Backend | Target Mechanism Maturity | Target Certification Tier | Required Filesystem Gate | Required Network Gate | Required Process Gate | Required Process-Count Gate | Required Resource Gate | Target Production Certified |
+|---|---|---|---|---|---|---|---|---|
+| **Linux (bwrap + cgroup v2)** | `PRODUCTION` | `PRODUCTION_CERTIFIED` | `PASS` (Namespace RO/tmpfs) | `PASS` (`--unshare-net`) | `PASS` (PID NS) | `PASS` (`pids.max`) | `PASS` (`memory.max`) | **YES (Post-CI & Adversarial Verification)** |
+| **Linux (bwrap, no cgroup v2)**| `EXPERIMENTAL` | `CI_VERIFIED` | `PASS` (Namespace RO/tmpfs) | `PASS` (`--unshare-net`) | `PASS` (PID NS) | `UNSUPPORTED` (Fail-closed on strict) | `UNSUPPORTED` (Fail-closed on strict) | ❌ **NO** (Incomplete resource enforcement) |
+| **Windows (AppContainer + Job)**| `PRODUCTION` | `PRODUCTION_CERTIFIED` | `PASS` (DACL isolation) | `PASS` (3-vector verified) | `PASS` (Job Object) | `PASS` (`ActiveProcessLimit`) | `PASS` (`JobMemoryLimit` commit) | **YES (Post-CI & Adversarial Verification)** |
+| **Windows (Legacy / No AppContainer)**| `LEGACY_UNSUPPORTED` | `UNSUPPORTED` | `UNSUPPORTED` | `UNSUPPORTED` | `UNSUPPORTED` | `UNSUPPORTED` | `UNSUPPORTED` | ❌ **NO** |
+| **macOS (Seatbelt `sandbox-exec`)**| `DEPRECATED` | `UNSUPPORTED` | `PASS` (SBPL deny) | `PASS` (SBPL deny) | `UNSUPPORTED` | `UNSUPPORTED` | `UNSUPPORTED` | ❌ **NO** (Blocked by Deprecation Policy) |
 
 ---
 
@@ -505,7 +629,7 @@ sequenceDiagram
 | **TH-05** | Stealing cloud metadata credentials (`http://169.254.169.254`) | Link-local network requests | Arbitrary code execution | Running on AWS/GCP/Azure VM | Cloud IAM role theft | Complete network isolation (down `lo`) | None (OS level required) | `test_net_metadata_endpoint_blocked` in CI | Non-network IPC |
 | **TH-06** | Connecting to unauthenticated host databases (`localhost:5432`, `6379`) | Loopback network interface access | Arbitrary code execution | Local database running | Database compromise / tampering | Network namespace without loopback sharing (Linux), AppContainer loopback block (Win) | None (OS level required) | `test_net_localhost_binding_isolated` in CI | Shared memory IPC |
 | **TH-07** | Orphaned background daemon persists after Sarthi finishes | Process detachment (`setsid`, `daemon`, double-fork) | Arbitrary code execution | Test command approved | Resource theft, persistent backdoor | PID namespace + `--die-with-parent` (Linux), Job Object `KILL_ON_JOB_CLOSE` (Win) | Timeout in subprocess.run | `test_proc_orphaned_children_terminated` in CI | Kernel unhandled process leaks |
-| **TH-08** | CPU / Memory exhaustion denial of service (Fork bomb, infinite allocation) | Excessive fork / malloc | Arbitrary code execution | Test command approved | Host workstation freeze / crash | `RLIMIT_AS` + `RLIMIT_NPROC` (Linux), Job Object memory & process limits (Win) | None (OS level required) | `test_proc_memory_limit_enforced` in CI | Kernel non-paged pool memory |
+| **TH-08** | CPU / Memory exhaustion denial of service (Fork bomb, infinite allocation) | Excessive fork / malloc | Arbitrary code execution | Test command approved | Host workstation freeze / crash | cgroup v2 `pids.max` + `memory.max` (Linux), Job Object `ActiveProcessLimit` & `JobMemoryLimit` (Win) | None (OS level required) | `test_proc_memory_limit_enforced` in CI | Kernel non-paged pool memory |
 | **TH-09** | Execution hang / infinite test loop | Process sleep or blocked I/O | Arbitrary code execution | Test command approved | Pipeline denial of service | Monotonic watchdog + kernel SIGKILL / `TerminateJobObject` | subprocess.run timeout | `test_proc_execution_timeout_hard_kill` in CI | Uninterruptible sleep state |
 | **TH-10** | Privilege escalation via SUID binaries or capabilities | Kernel syscalls (`setuid`, `capset`) | Arbitrary code execution | Test command approved | Root / System host takeover | `bwrap --unshare-user --cap-drop ALL` (Linux), AppContainer token (Win) | None (OS level required) | `test_proc_privilege_escalation_denied` in CI | Host kernel CVEs |
 | **TH-11** | Fail-Open Downgrade Attack | Sandbox backend error handling | Tampering or missing dependency | Backend initialization error | Unsandboxed host execution | Strict fail-closed policy (raise exception; abort execution) | None (Architecture required) | `test_fail_closed_on_backend_error` in CI | Logic errors in error handlers |
@@ -580,3 +704,42 @@ graph TD
     M4 --> M5
     M5 --> M6
 ```
+
+---
+
+## 10. Summary of Architectural Consistency Corrections (SEC-01C.1 Final Pre-Implementation Revision)
+
+This section documents the specific consistency corrections incorporated into this specification prior to backend implementation:
+
+### Correction 1: Linux cgroup Race-Free Process Creation
+* **Defect Identified:** Moving a running process into a cgroup asynchronously creates a critical race condition where untrusted code executes unconstrained before cgroup resource limits attach.
+* **Resolution (Section 3.B.10):**
+  - Spawning an unconstrained process and migrating it to `cgroup.procs` asynchronously is **strictly prohibited**.
+  - **Primary Mechanism (Linux 5.7+):** Uses `clone3()` with `CLONE_INTO_CGROUP` and `cgroup = cgroup_fd` to atomically spawn the sandbox child directly inside the cgroup at birth, ensuring limits (`pids.max`, `memory.max`) are active at the first instruction.
+  - **Fallback Synchronization Barrier (Pre-5.7 Kernels):** Employs an internal synchronization pipe barrier (`sync_pipe`) where the child blocks on `read()` before `execve`, while the supervisor writes the child PID to `cgroup.procs` and verifies attachment before writing the release authorization byte.
+  - **Fail-Closed Guarantee:** If cgroup controllers or attachment cannot be guaranteed before execution, Sarthi flags `resource_enforcement = UNSUPPORTED` and fails closed (`SandboxCapabilityUnavailableError`).
+
+### Correction 2: Certification Matrix Consistency & Removal of Premature Claims
+* **Defect Identified:** Prior drafts prematurely labeled unimplemented backends with `PASS` statuses, `PRODUCTION` maturity, and production certification `YES`.
+* **Resolution (Section 4):**
+  - Removed all premature `PASS` and `PRODUCTION` claims for unimplemented or unverified capabilities.
+  - Separated the capability assessment into two distinct tables:
+    - **Table 4.1 (Current Implementation & Verification Status):** Reflects the codebase today—all unbuilt backends are marked `MechanismMaturity.IMPLEMENTATION_PENDING`, unverified capabilities are marked `CapabilityStatus.UNVERIFIED`, and Production Certified is strictly ❌ **NO**.
+    - **Table 4.2 (Target Architectural Capability Gates & Exit Criteria):** Defines the mandatory adversarial gates required for a backend to exit development milestones post-CI.
+  - Production certification remains strictly **NO** until backend implementation, CI execution on target runner virtual machines, and adversarial penetration tests prove kernel boundaries without regressions.
+
+### Correction 3: Windows Job Object Memory Semantics & Platform Non-Equivalence
+* **Defect Identified:** Equating Windows Job Object memory limits directly to Linux cgroup `memory.max` conflated two fundamentally different OS memory models.
+* **Resolution (Section 3.A.7):**
+  - Win32 `JobMemoryLimit` (`JOB_OBJECT_LIMIT_JOB_MEMORY`) enforces a limit on **aggregate committed virtual memory** (`VirtualAlloc(MEM_COMMIT)`), backed by system commit charge (RAM + pagefile). It does not restrict uncommitted virtual address space reservations (`MEM_RESERVE`).
+  - Linux cgroup v2 `memory.max` constrains **physical resident pages** (RSS anonymous memory, active/inactive page cache, and kernel slab). Swap is controlled independently via `memory.swap.max`.
+  - Exceeding limits triggers different kernel actions: Linux invokes the OOM killer (`memory.oom.group = 1`), whereas Windows fails individual allocation requests or aborts processes.
+  - Sarthi explicitly documents these platform-specific accounting differences and **does not claim equivalent cross-platform memory enforcement semantics**.
+
+### Correction 4: Linux cgroup Termination and Emptiness-Verified Cleanup
+* **Defect Identified:** Calling `rmdir()` without verified drain risks `EBUSY` failures, and iterative killing in userspace is vulnerable to rapid fork bomb races or supervisor process contamination.
+* **Resolution (Section 3.B.10):**
+  - **Atomic Termination (Linux 5.14+):** Writing `1` to `cgroup.kill` atomically signals all processes in the cgroup tree simultaneously, eliminating userspace iteration races.
+  - **Emptiness Verification:** The supervisor polls `cgroup.events` verifying `populated 0` (and `cgroup.procs` is empty) before invoking `os.rmdir()`.
+  - **Supervisor & Host Isolation:** The supervisor verifies its own PID is never in the sandbox cgroup and strictly confines destruction to ephemeral child paths (`/sys/fs/cgroup/.../sarthi-sandbox-$UUID/`).
+  - **Failure Handling:** If a cgroup fails to drain within the timeout, Sarthi raises `SandboxCleanupError`, logs residual PIDs, marks the report with cleanup failure, and preserves diagnostic evidence.
