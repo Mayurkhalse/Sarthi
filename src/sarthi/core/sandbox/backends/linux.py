@@ -300,45 +300,59 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
         # 2. Dynamic linkers & system alternatives
         for extra in ("/etc/ld.so.cache", "/etc/ld.so.conf.d", "/etc/alternatives"):
             if os.path.isfile(extra):
-                mount_args.extend(["--ro-bind", extra, extra])
+                mount_args.extend(["--dir", "/etc", "--ro-bind", extra, extra])
             elif os.path.isdir(extra):
-                mount_args.extend(["--ro-bind", extra, extra])
+                mount_args.extend(["--dir", extra, "--ro-bind", extra, extra])
 
         # 3. DNS / SSL certs if network is not blocked
         if policy.network != NetworkPolicy.BLOCKED:
             for net_meta in ("/etc/resolv.conf", "/etc/ssl", "/etc/pki", "/etc/ca-certificates"):
-                if os.path.isfile(net_meta) or os.path.isdir(net_meta):
-                    mount_args.extend(["--ro-bind", net_meta, net_meta])
+                if os.path.isfile(net_meta):
+                    mount_args.extend(["--dir", str(Path(net_meta).parent), "--ro-bind", net_meta, net_meta])
+                elif os.path.isdir(net_meta):
+                    mount_args.extend(["--dir", net_meta, "--ro-bind", net_meta, net_meta])
 
-        # 4. Python runtime closure (interpreter, virtualenv, base prefixes)
+        # 4. Python runtime closure (interpreter, virtualenv, base prefixes, and real executable)
         ws_resolved = workspace_root.resolve()
-        for py_dir in (sys.prefix, sys.base_prefix):
-            try:
-                resolved_p = Path(py_dir).resolve()
-                if resolved_p.is_dir() and resolved_p != Path("/usr"):
-                    try:
-                        resolved_p.relative_to(ws_resolved)
-                    except ValueError:
-                        # Outside workspace: mount read-only
-                        resolved_str = str(resolved_p)
-                        if resolved_str not in mount_args:
-                            mount_args.extend(["--ro-bind", resolved_str, resolved_str])
-            except Exception:
-                pass
+        python_dirs: set[Path] = set()
 
-        # Ensure directory containing sys.executable is mounted
+        for py_dir in (sys.prefix, sys.base_prefix):
+            if py_dir:
+                try:
+                    p = Path(py_dir).resolve()
+                    if p.is_dir() and p != Path("/usr"):
+                        python_dirs.add(p)
+                except Exception:
+                    pass
+
         try:
             real_exe = Path(sys.executable).resolve()
-            for cand in (real_exe.parent, real_exe.parent.parent):
-                if cand.is_dir() and cand != Path("/usr") and cand != Path("/"):
-                    try:
-                        cand.relative_to(ws_resolved)
-                    except ValueError:
-                        cand_str = str(cand)
-                        if cand_str not in mount_args:
-                            mount_args.extend(["--ro-bind", cand_str, cand_str])
+            if real_exe.is_file():
+                for cand in (real_exe.parent, real_exe.parent.parent):
+                    if cand.is_dir() and cand != Path("/usr") and cand != Path("/"):
+                        python_dirs.add(cand)
         except Exception:
             pass
+
+        try:
+            raw_exe_parent = Path(sys.executable).parent
+            if raw_exe_parent.is_dir() and raw_exe_parent != Path("/usr/bin"):
+                python_dirs.add(raw_exe_parent.resolve())
+                if raw_exe_parent.parent.is_dir() and raw_exe_parent.parent != Path("/usr"):
+                    python_dirs.add(raw_exe_parent.parent.resolve())
+        except Exception:
+            pass
+
+        mounted_targets: set[str] = set()
+        for p_dir in sorted(python_dirs, key=lambda p: len(p.parts)):
+            p_str = str(p_dir)
+            if p_str in mounted_targets:
+                continue
+            try:
+                p_dir.relative_to(ws_resolved)
+            except ValueError:
+                mount_args.extend(["--dir", p_str, "--ro-bind", p_str, p_str])
+                mounted_targets.add(p_str)
 
         # 5. Node.js runtime closure if available and outside /usr
         node_bin = shutil.which("node")
@@ -351,7 +365,8 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
                         try:
                             node_dir.relative_to(ws_resolved)
                         except ValueError:
-                            mount_args.extend(["--ro-bind", str(node_dir), str(node_dir)])
+                            n_str = str(node_dir)
+                            mount_args.extend(["--dir", n_str, "--ro-bind", n_str, n_str])
             except Exception:
                 pass
 
