@@ -417,7 +417,7 @@ def test_linux_backend_run_with_cgroup_synchronization_barrier(tmp_path: Path) -
             swap_max_bytes=0,
             oom_group=True,
         )
-        mock_cgroup_mgr.attach_pid.assert_called_once_with(9876)
+        mock_cgroup_mgr.verify_pid_attached.assert_called_once_with(9876)
         mock_cgroup_mgr.cleanup.assert_called_once()
         mock_popen.assert_called_once()
 
