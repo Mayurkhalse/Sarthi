@@ -21,6 +21,7 @@ from sarthi.core.sandbox.git import SterileGitExecutor
 from sarthi.core.sandbox.manager import SandboxManager
 from sarthi.core.sandbox.policy import (
     CapabilityStatus,
+    CertificationTier,
     FilesystemPolicy,
     MechanismMaturity,
     NetworkPolicy,
@@ -32,6 +33,7 @@ from sarthi.core.sandbox.staging import WorkspaceStagingManager
 
 __all__ = [
     "CapabilityStatus",
+    "CertificationTier",
     "FilesystemPolicy",
     "GitSecurityPolicyError",
     "MechanismMaturity",

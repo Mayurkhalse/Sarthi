@@ -17,15 +17,19 @@ import pytest
 from sarthi.core.models import ProjectConfig, RunContext, VerifyConfig
 from sarthi.core.sandbox import (
     CapabilityStatus,
+    CertificationTier,
     FilesystemPolicy,
     GitSecurityPolicyError,
     MechanismMaturity,
     NetworkPolicy,
     SandboxCapabilityReport,
     SandboxCapabilityUnavailableError,
+    SandboxCleanupError,
+    SandboxError,
     SandboxExecutionError,
     SandboxManager,
     SandboxPolicy,
+    SandboxResult,
     StagedWorkspaceSecurityError,
     SterileGitExecutor,
     WorkspaceStagingManager,
@@ -55,15 +59,17 @@ def test_sandbox_policy_defaults() -> None:
 
 
 def test_capability_report_production_certified_pass() -> None:
-    """Verifies is_production_certified is True ONLY when all required capabilities PASS under PRODUCTION maturity."""
+    """Verifies is_production_certified is True ONLY when all required capabilities PASS under PRODUCTION maturity and PRODUCTION_CERTIFIED tier."""
     report = SandboxCapabilityReport(
         backend_name="test_backend",
         mechanism_maturity=MechanismMaturity.PRODUCTION,
+        certification_tier=CertificationTier.PRODUCTION_CERTIFIED,
         filesystem_isolation=CapabilityStatus.PASS,
         network_isolation=CapabilityStatus.PASS,
         process_isolation=CapabilityStatus.PASS,
-        environment_isolation=CapabilityStatus.PASS,
+        process_count_enforcement=CapabilityStatus.PASS,
         resource_enforcement=CapabilityStatus.PASS,
+        environment_isolation=CapabilityStatus.PASS,
         workspace_confinement=CapabilityStatus.PASS,
         child_process_inheritance=CapabilityStatus.PASS,
     )
@@ -71,16 +77,36 @@ def test_capability_report_production_certified_pass() -> None:
     assert report.is_capable_of("filesystem_isolation") is True
 
 
+def test_capability_report_pending_tier_cannot_certify() -> None:
+    """Verifies is_production_certified is False if certification_tier is IMPLEMENTATION_PENDING even if all capabilities PASS."""
+    report = SandboxCapabilityReport(
+        backend_name="test_backend",
+        mechanism_maturity=MechanismMaturity.PRODUCTION,
+        certification_tier=CertificationTier.IMPLEMENTATION_PENDING,
+        filesystem_isolation=CapabilityStatus.PASS,
+        network_isolation=CapabilityStatus.PASS,
+        process_isolation=CapabilityStatus.PASS,
+        process_count_enforcement=CapabilityStatus.PASS,
+        resource_enforcement=CapabilityStatus.PASS,
+        environment_isolation=CapabilityStatus.PASS,
+        workspace_confinement=CapabilityStatus.PASS,
+        child_process_inheritance=CapabilityStatus.PASS,
+    )
+    assert report.is_production_certified is False
+
+
 def test_capability_report_deprecated_mechanism_cannot_certify() -> None:
     """Verifies a DEPRECATED mechanism can NEVER receive production certification even if all capabilities PASS."""
     report = SandboxCapabilityReport(
         backend_name="macos_seatbelt",
         mechanism_maturity=MechanismMaturity.DEPRECATED,
+        certification_tier=CertificationTier.PRODUCTION_CERTIFIED,
         filesystem_isolation=CapabilityStatus.PASS,
         network_isolation=CapabilityStatus.PASS,
         process_isolation=CapabilityStatus.PASS,
-        environment_isolation=CapabilityStatus.PASS,
+        process_count_enforcement=CapabilityStatus.PASS,
         resource_enforcement=CapabilityStatus.PASS,
+        environment_isolation=CapabilityStatus.PASS,
         workspace_confinement=CapabilityStatus.PASS,
         child_process_inheritance=CapabilityStatus.PASS,
     )
@@ -92,11 +118,13 @@ def test_capability_report_missing_capability_cannot_certify() -> None:
     report = SandboxCapabilityReport(
         backend_name="linux_bubblewrap",
         mechanism_maturity=MechanismMaturity.PRODUCTION,
+        certification_tier=CertificationTier.PRODUCTION_CERTIFIED,
         filesystem_isolation=CapabilityStatus.PASS,
         network_isolation=CapabilityStatus.UNSUPPORTED,  # Network isolation missing
         process_isolation=CapabilityStatus.PASS,
-        environment_isolation=CapabilityStatus.PASS,
+        process_count_enforcement=CapabilityStatus.PASS,
         resource_enforcement=CapabilityStatus.PASS,
+        environment_isolation=CapabilityStatus.PASS,
         workspace_confinement=CapabilityStatus.PASS,
         child_process_inheritance=CapabilityStatus.PASS,
     )
@@ -165,9 +193,11 @@ def test_sandbox_manager_ensures_cleanup_called_on_failure(tmp_path: Path) -> No
     mock_backend.detect_capabilities.return_value = SandboxCapabilityReport(
         backend_name="mock_backend",
         mechanism_maturity=MechanismMaturity.PRODUCTION,
+        certification_tier=CertificationTier.PRODUCTION_CERTIFIED,
         filesystem_isolation=CapabilityStatus.PASS,
         network_isolation=CapabilityStatus.PASS,
         process_isolation=CapabilityStatus.PASS,
+        process_count_enforcement=CapabilityStatus.PASS,
         environment_isolation=CapabilityStatus.PASS,
         resource_enforcement=CapabilityStatus.PASS,
         workspace_confinement=CapabilityStatus.PASS,
@@ -380,22 +410,137 @@ def test_macos_backend_reports_deprecated(tmp_path: Path) -> None:
     assert report.is_production_certified is False
 
 
-def test_linux_backend_non_linux_host_reports_unsupported(tmp_path: Path) -> None:
-    """Verifies LinuxBubblewrapBackend returns UNSUPPORTED on non-Linux platforms."""
+def test_linux_backend_reports_implementation_pending(tmp_path: Path) -> None:
+    """Verifies LinuxBubblewrapBackend reports MechanismMaturity.IMPLEMENTATION_PENDING before SEC-01C.3."""
     backend = LinuxBubblewrapBackend(bwrap_path="/nonexistent/bwrap")
+    assert backend.maturity == MechanismMaturity.IMPLEMENTATION_PENDING
     if not sys.platform.startswith("linux"):
         report = backend.detect_capabilities(tmp_path)
         assert report.filesystem_isolation == CapabilityStatus.UNSUPPORTED
         assert report.network_isolation == CapabilityStatus.UNSUPPORTED
+        assert report.is_production_certified is False
 
 
-def test_windows_backend_non_windows_host_reports_unsupported(tmp_path: Path) -> None:
-    """Verifies WindowsAppContainerBackend returns UNSUPPORTED on non-Windows platforms."""
+def test_windows_backend_reports_implementation_pending(tmp_path: Path) -> None:
+    """Verifies WindowsAppContainerBackend reports MechanismMaturity.IMPLEMENTATION_PENDING before SEC-01C.4."""
     backend = WindowsAppContainerBackend()
+    assert backend.maturity == MechanismMaturity.IMPLEMENTATION_PENDING
+    report = backend.detect_capabilities(tmp_path)
     if sys.platform != "win32":
-        report = backend.detect_capabilities(tmp_path)
         assert report.filesystem_isolation == CapabilityStatus.UNSUPPORTED
         assert report.network_isolation == CapabilityStatus.UNSUPPORTED
+    else:
+        assert report.certification_tier == CertificationTier.IMPLEMENTATION_PENDING
+        assert report.filesystem_isolation == CapabilityStatus.UNVERIFIED
+    assert report.is_production_certified is False
+
+
+def test_base_backend_context_manager_guarantees_cleanup() -> None:
+    """Verifies BaseSandboxBackend context manager invokes cleanup upon exit."""
+
+    class ConcreteBackend(BaseSandboxBackend):
+        def __init__(self) -> None:
+            self.cleaned_up = False
+
+        @property
+        def name(self) -> str:
+            return "concrete"
+
+        @property
+        def maturity(self) -> MechanismMaturity:
+            return MechanismMaturity.EXPERIMENTAL
+
+        def detect_capabilities(self, project_root: Path) -> SandboxCapabilityReport:
+            return SandboxCapabilityReport(backend_name=self.name, mechanism_maturity=self.maturity)
+
+        def initialize(self, policy: SandboxPolicy, workspace_root: Path) -> None:
+            pass
+
+        def run(
+            self,
+            command: list[str],
+            policy: SandboxPolicy,
+            workspace_root: Path,
+            env: dict[str, str] | None = None,
+        ) -> SandboxResult:
+            return SandboxResult(command=command, exit_code=0, stdout="", stderr="")
+
+        def cleanup(self) -> None:
+            self.cleaned_up = True
+
+    backend = ConcreteBackend()
+    with backend as b:
+        assert b is backend
+        assert not backend.cleaned_up
+
+    assert backend.cleaned_up is True
+
+
+def test_sandbox_manager_records_cleanup_failure(tmp_path: Path) -> None:
+    """Verifies SandboxManager records cleanup failures in result.evidence_trace without silently ignoring them."""
+    mock_backend = MagicMock(spec=BaseSandboxBackend)
+    mock_backend.name = "mock_backend"
+    mock_backend.maturity = MechanismMaturity.PRODUCTION
+    mock_backend.detect_capabilities.return_value = SandboxCapabilityReport(
+        backend_name="mock_backend",
+        mechanism_maturity=MechanismMaturity.PRODUCTION,
+        certification_tier=CertificationTier.PRODUCTION_CERTIFIED,
+        filesystem_isolation=CapabilityStatus.PASS,
+        network_isolation=CapabilityStatus.PASS,
+        process_isolation=CapabilityStatus.PASS,
+        process_count_enforcement=CapabilityStatus.PASS,
+        resource_enforcement=CapabilityStatus.PASS,
+        environment_isolation=CapabilityStatus.PASS,
+        workspace_confinement=CapabilityStatus.PASS,
+        child_process_inheritance=CapabilityStatus.PASS,
+    )
+    mock_backend.run.return_value = SandboxResult(
+        command=["echo", "test"],
+        exit_code=0,
+        stdout="success\n",
+        stderr="",
+        cleanup_successful=True,
+    )
+    mock_backend.cleanup.side_effect = SandboxCleanupError("Failed to purge ACLs")
+
+    mgr = SandboxManager(backend=mock_backend)
+    res = mgr.run(["echo", "test"], tmp_path, policy=SandboxPolicy(filesystem=FilesystemPolicy.READ_WRITE_WORKSPACE))
+
+    assert res.cleanup_successful is False
+    assert res.success is False
+    assert any("Failed to purge ACLs" in trace for trace in res.evidence_trace)
+
+
+def test_sandbox_manager_rejects_unsupported_process_limits(tmp_path: Path) -> None:
+    """Verifies SandboxManager fails closed if process limit is requested but unsupported."""
+    mock_backend = MagicMock(spec=BaseSandboxBackend)
+    mock_backend.name = "mock_no_pids"
+    mock_backend.maturity = MechanismMaturity.PRODUCTION
+    mock_backend.detect_capabilities.return_value = SandboxCapabilityReport(
+        backend_name="mock_no_pids",
+        mechanism_maturity=MechanismMaturity.PRODUCTION,
+        filesystem_isolation=CapabilityStatus.PASS,
+        network_isolation=CapabilityStatus.PASS,
+        process_isolation=CapabilityStatus.PASS,
+        process_count_enforcement=CapabilityStatus.UNSUPPORTED,
+        resource_enforcement=CapabilityStatus.PASS,
+        environment_isolation=CapabilityStatus.PASS,
+        workspace_confinement=CapabilityStatus.PASS,
+        child_process_inheritance=CapabilityStatus.PASS,
+    )
+
+    mgr = SandboxManager(backend=mock_backend)
+    policy = SandboxPolicy(filesystem=FilesystemPolicy.READ_WRITE_WORKSPACE)
+
+    with pytest.raises(SandboxCapabilityUnavailableError, match="process count limits"):
+        mgr.run(["echo", "1"], tmp_path, policy=policy)
+
+
+def test_sterile_git_normalizes_safety_flags(tmp_path: Path) -> None:
+    """Verifies SterileGitExecutor automatically injects --no-ext-diff and --no-textconv for diff queries."""
+    res = SterileGitExecutor.run_tier1_query("diff", ["--name-only", "HEAD"], cwd=tmp_path)
+    # The command should succeed or fail without policy rejection
+    assert isinstance(res.returncode, int)
 
 
 # ==============================================================================

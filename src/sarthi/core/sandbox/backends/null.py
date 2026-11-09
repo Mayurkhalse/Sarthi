@@ -10,7 +10,12 @@ from pathlib import Path
 
 from sarthi.core.sandbox.base import BaseSandboxBackend
 from sarthi.core.sandbox.exceptions import SandboxCapabilityUnavailableError
-from sarthi.core.sandbox.policy import CapabilityStatus, MechanismMaturity, SandboxPolicy
+from sarthi.core.sandbox.policy import (
+    CapabilityStatus,
+    CertificationTier,
+    MechanismMaturity,
+    SandboxPolicy,
+)
 from sarthi.core.sandbox.result import SandboxCapabilityReport, SandboxResult
 
 
@@ -30,11 +35,13 @@ class NullSandboxBackend(BaseSandboxBackend):
         return SandboxCapabilityReport(
             backend_name=self.name,
             mechanism_maturity=self.maturity,
+            certification_tier=CertificationTier.IMPLEMENTATION_PENDING,
             filesystem_isolation=CapabilityStatus.UNSUPPORTED,
             network_isolation=CapabilityStatus.UNSUPPORTED,
             process_isolation=CapabilityStatus.UNSUPPORTED,
-            environment_isolation=CapabilityStatus.UNSUPPORTED,
+            process_count_enforcement=CapabilityStatus.UNSUPPORTED,
             resource_enforcement=CapabilityStatus.UNSUPPORTED,
+            environment_isolation=CapabilityStatus.UNSUPPORTED,
             workspace_confinement=CapabilityStatus.UNSUPPORTED,
             child_process_inheritance=CapabilityStatus.UNSUPPORTED,
             evidence_trace=["Null backend provides zero OS-level isolation primitives."],

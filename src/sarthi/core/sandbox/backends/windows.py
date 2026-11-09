@@ -23,6 +23,7 @@ from sarthi.core.sandbox.exceptions import (
 )
 from sarthi.core.sandbox.policy import (
     CapabilityStatus,
+    CertificationTier,
     MechanismMaturity,
     SandboxPolicy,
 )
@@ -44,7 +45,7 @@ class WindowsAppContainerBackend(BaseSandboxBackend):
 
     @property
     def maturity(self) -> MechanismMaturity:
-        return MechanismMaturity.PRODUCTION
+        return MechanismMaturity.IMPLEMENTATION_PENDING
 
     def is_available(self) -> bool:
         """Checks if running on Windows with accessible Win32 userenv / kernel32 APIs."""
@@ -60,11 +61,13 @@ class WindowsAppContainerBackend(BaseSandboxBackend):
             return SandboxCapabilityReport(
                 backend_name=self.name,
                 mechanism_maturity=self.maturity,
+                certification_tier=CertificationTier.IMPLEMENTATION_PENDING,
                 filesystem_isolation=CapabilityStatus.UNSUPPORTED,
                 network_isolation=CapabilityStatus.UNSUPPORTED,
                 process_isolation=CapabilityStatus.UNSUPPORTED,
-                environment_isolation=CapabilityStatus.UNSUPPORTED,
+                process_count_enforcement=CapabilityStatus.UNSUPPORTED,
                 resource_enforcement=CapabilityStatus.UNSUPPORTED,
+                environment_isolation=CapabilityStatus.UNSUPPORTED,
                 workspace_confinement=CapabilityStatus.UNSUPPORTED,
                 child_process_inheritance=CapabilityStatus.UNSUPPORTED,
                 evidence_trace=["Not running on Windows."],
@@ -74,11 +77,13 @@ class WindowsAppContainerBackend(BaseSandboxBackend):
             return SandboxCapabilityReport(
                 backend_name=self.name,
                 mechanism_maturity=self.maturity,
+                certification_tier=CertificationTier.IMPLEMENTATION_PENDING,
                 filesystem_isolation=CapabilityStatus.UNSUPPORTED,
                 network_isolation=CapabilityStatus.UNSUPPORTED,
                 process_isolation=CapabilityStatus.UNSUPPORTED,
-                environment_isolation=CapabilityStatus.UNSUPPORTED,
+                process_count_enforcement=CapabilityStatus.UNSUPPORTED,
                 resource_enforcement=CapabilityStatus.UNSUPPORTED,
+                environment_isolation=CapabilityStatus.UNSUPPORTED,
                 workspace_confinement=CapabilityStatus.UNSUPPORTED,
                 child_process_inheritance=CapabilityStatus.UNSUPPORTED,
                 evidence_trace=["Win32 userenv/kernel32 DLLs unavailable."],
@@ -87,17 +92,19 @@ class WindowsAppContainerBackend(BaseSandboxBackend):
         return SandboxCapabilityReport(
             backend_name=self.name,
             mechanism_maturity=self.maturity,
-            filesystem_isolation=CapabilityStatus.PASS,
-            network_isolation=CapabilityStatus.PASS,
-            process_isolation=CapabilityStatus.PASS,
-            environment_isolation=CapabilityStatus.PASS,
-            resource_enforcement=CapabilityStatus.PASS,
-            workspace_confinement=CapabilityStatus.PASS,
-            child_process_inheritance=CapabilityStatus.PASS,
+            certification_tier=CertificationTier.IMPLEMENTATION_PENDING,
+            filesystem_isolation=CapabilityStatus.UNVERIFIED,
+            network_isolation=CapabilityStatus.UNVERIFIED,
+            process_isolation=CapabilityStatus.UNVERIFIED,
+            process_count_enforcement=CapabilityStatus.UNVERIFIED,
+            resource_enforcement=CapabilityStatus.UNVERIFIED,
+            environment_isolation=CapabilityStatus.UNVERIFIED,
+            workspace_confinement=CapabilityStatus.UNVERIFIED,
+            child_process_inheritance=CapabilityStatus.UNVERIFIED,
             evidence_trace=[
-                "Windows AppContainer APIs verified via userenv.dll.",
-                "Job Object limits and process tracking supported via kernel32.dll.",
-                "Default-deny network isolation via Windows Filtering Platform (zero capabilities).",
+                "Windows AppContainer APIs present in userenv.dll.",
+                "Job Object APIs present in kernel32.dll.",
+                "Kernel isolation and 3-vector network verification pending implementation (SEC-01C.4).",
             ],
         )
 

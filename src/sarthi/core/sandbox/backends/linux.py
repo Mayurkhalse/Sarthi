@@ -21,6 +21,7 @@ from sarthi.core.sandbox.exceptions import (
 )
 from sarthi.core.sandbox.policy import (
     CapabilityStatus,
+    CertificationTier,
     MechanismMaturity,
     NetworkPolicy,
     SandboxPolicy,
@@ -41,7 +42,7 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
 
     @property
     def maturity(self) -> MechanismMaturity:
-        return MechanismMaturity.PRODUCTION
+        return MechanismMaturity.IMPLEMENTATION_PENDING
 
     def is_available(self) -> bool:
         """Checks if running on Linux with a functional bwrap binary."""
@@ -54,11 +55,13 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
             return SandboxCapabilityReport(
                 backend_name=self.name,
                 mechanism_maturity=self.maturity,
+                certification_tier=CertificationTier.IMPLEMENTATION_PENDING,
                 filesystem_isolation=CapabilityStatus.UNSUPPORTED,
                 network_isolation=CapabilityStatus.UNSUPPORTED,
                 process_isolation=CapabilityStatus.UNSUPPORTED,
-                environment_isolation=CapabilityStatus.UNSUPPORTED,
+                process_count_enforcement=CapabilityStatus.UNSUPPORTED,
                 resource_enforcement=CapabilityStatus.UNSUPPORTED,
+                environment_isolation=CapabilityStatus.UNSUPPORTED,
                 workspace_confinement=CapabilityStatus.UNSUPPORTED,
                 child_process_inheritance=CapabilityStatus.UNSUPPORTED,
                 evidence_trace=["Not running on Linux."],
@@ -68,30 +71,34 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
             return SandboxCapabilityReport(
                 backend_name=self.name,
                 mechanism_maturity=self.maturity,
+                certification_tier=CertificationTier.IMPLEMENTATION_PENDING,
                 filesystem_isolation=CapabilityStatus.UNSUPPORTED,
                 network_isolation=CapabilityStatus.UNSUPPORTED,
                 process_isolation=CapabilityStatus.UNSUPPORTED,
-                environment_isolation=CapabilityStatus.UNSUPPORTED,
+                process_count_enforcement=CapabilityStatus.UNSUPPORTED,
                 resource_enforcement=CapabilityStatus.UNSUPPORTED,
+                environment_isolation=CapabilityStatus.UNSUPPORTED,
                 workspace_confinement=CapabilityStatus.UNSUPPORTED,
                 child_process_inheritance=CapabilityStatus.UNSUPPORTED,
                 evidence_trace=["bubblewrap (bwrap) binary not found on Linux host."],
             )
 
-        # On Linux with bwrap present, capabilities are supported
+        # On Linux with bwrap present, capabilities are pending implementation/verification
         return SandboxCapabilityReport(
             backend_name=self.name,
             mechanism_maturity=self.maturity,
-            filesystem_isolation=CapabilityStatus.PASS,
-            network_isolation=CapabilityStatus.PASS,
-            process_isolation=CapabilityStatus.PASS,
-            environment_isolation=CapabilityStatus.PASS,
-            resource_enforcement=CapabilityStatus.PASS,
-            workspace_confinement=CapabilityStatus.PASS,
-            child_process_inheritance=CapabilityStatus.PASS,
+            certification_tier=CertificationTier.IMPLEMENTATION_PENDING,
+            filesystem_isolation=CapabilityStatus.UNVERIFIED,
+            network_isolation=CapabilityStatus.UNVERIFIED,
+            process_isolation=CapabilityStatus.UNVERIFIED,
+            process_count_enforcement=CapabilityStatus.UNVERIFIED,
+            resource_enforcement=CapabilityStatus.UNVERIFIED,
+            environment_isolation=CapabilityStatus.UNVERIFIED,
+            workspace_confinement=CapabilityStatus.UNVERIFIED,
+            child_process_inheritance=CapabilityStatus.UNVERIFIED,
             evidence_trace=[
-                "Bubblewrap (bwrap) binary present and verified.",
-                "Minimal mount namespace, unshare-net, and unshare-pid supported.",
+                "Bubblewrap (bwrap) binary detected on host.",
+                "Kernel namespace and cgroup v2 integration pending implementation (SEC-01C.3).",
             ],
         )
 

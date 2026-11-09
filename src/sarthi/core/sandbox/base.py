@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from pathlib import Path
+from types import TracebackType
 
 from sarthi.core.sandbox.policy import MechanismMaturity, SandboxPolicy
 from sarthi.core.sandbox.result import SandboxCapabilityReport, SandboxResult
@@ -15,6 +16,19 @@ from sarthi.core.sandbox.result import SandboxCapabilityReport, SandboxResult
 
 class BaseSandboxBackend(ABC):
     """Abstract interface defining the contract for OS-level subprocess sandboxes."""
+
+    def __enter__(self) -> BaseSandboxBackend:
+        """Context manager entry protocol."""
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        """Context manager exit protocol guaranteeing cleanup."""
+        self.cleanup()
 
     @property
     @abstractmethod

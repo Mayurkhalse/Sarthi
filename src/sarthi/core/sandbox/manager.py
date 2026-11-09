@@ -16,6 +16,7 @@ from sarthi.core.sandbox.backends.windows import WindowsAppContainerBackend
 from sarthi.core.sandbox.base import BaseSandboxBackend
 from sarthi.core.sandbox.exceptions import (
     SandboxCapabilityUnavailableError,
+    SandboxCleanupError,
 )
 from sarthi.core.sandbox.policy import (
     CapabilityStatus,
@@ -84,6 +85,18 @@ class SandboxManager:
                     f"Backend '{report.backend_name}' does not support required network isolation. Fail-closed."
                 )
 
+        # Fail-closed check: Process count limit requirement
+        if policy.limits.max_processes and report.process_count_enforcement == CapabilityStatus.UNSUPPORTED:
+            raise SandboxCapabilityUnavailableError(
+                f"Backend '{report.backend_name}' does not support process count limits (pids.max / Job Object limit). Fail-closed."
+            )
+
+        # Fail-closed check: Resource enforcement requirement
+        if policy.limits.max_memory_bytes and report.resource_enforcement == CapabilityStatus.UNSUPPORTED:
+            raise SandboxCapabilityUnavailableError(
+                f"Backend '{report.backend_name}' does not support memory resource enforcement. Fail-closed."
+            )
+
         return report
 
     def run(
@@ -130,15 +143,23 @@ class SandboxManager:
         capability_report: SandboxCapabilityReport,
     ) -> SandboxResult:
         """Coordinates initialization, execution, and cleanup with guaranteed teardown."""
+        result: SandboxResult | None = None
+        exec_exc: Exception | None = None
         try:
             self.backend.initialize(policy, target_dir)
             result = self.backend.run(command, policy, target_dir, env=env)
             result.capability_report = capability_report
             return result
+        except Exception as e:
+            exec_exc = e
+            raise
         finally:
             try:
                 self.backend.cleanup()
-            except Exception:
-                # Log cleanup warning but do not overwrite primary execution exception
-                pass
+            except Exception as cleanup_exc:
+                if result is not None:
+                    result.cleanup_successful = False
+                    result.evidence_trace.append(f"Cleanup failure: {cleanup_exc}")
+                if exec_exc is None and result is None:
+                    raise SandboxCleanupError(f"Sandbox cleanup failed: {cleanup_exc}") from cleanup_exc
 

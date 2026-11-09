@@ -17,16 +17,27 @@ class CapabilityStatus(str, Enum):
     PASS = "PASS"
     FAIL = "FAIL"
     UNSUPPORTED = "UNSUPPORTED"
-    NOT_VERIFIED = "NOT_VERIFIED"
+    UNVERIFIED = "UNVERIFIED"
+    NOT_VERIFIED = "UNVERIFIED"  # Backwards-compatible alias
 
 
 class MechanismMaturity(str, Enum):
     """Maturity and support level of the underlying OS isolation primitive."""
 
+    IMPLEMENTATION_PENDING = "IMPLEMENTATION_PENDING"
     PRODUCTION = "PRODUCTION"
     EXPERIMENTAL = "EXPERIMENTAL"
     DEPRECATED = "DEPRECATED"
     LEGACY_UNSUPPORTED = "LEGACY_UNSUPPORTED"
+
+
+class CertificationTier(str, Enum):
+    """Rigid four-tier lifecycle for sandbox security certification."""
+
+    IMPLEMENTATION_PENDING = "IMPLEMENTATION_PENDING"
+    CAPABILITY_AVAILABLE_UNVERIFIED = "CAPABILITY_AVAILABLE_UNVERIFIED"
+    CI_VERIFIED = "CI_VERIFIED"
+    PRODUCTION_CERTIFIED = "PRODUCTION_CERTIFIED"
 
 
 class NetworkPolicy(str, Enum):
