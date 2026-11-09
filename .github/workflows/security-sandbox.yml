@@ -44,9 +44,11 @@ jobs:
           # Create dedicated /sys/fs/cgroup/sarthi delegation directory (zero internal processes, avoiding EBUSY)
           sudo mkdir -p /sys/fs/cgroup/sarthi
           sudo chown -R runner:runner /sys/fs/cgroup/sarthi
+          sudo chmod -R a+rwX /sys/fs/cgroup/sarthi
           sudo bash -c "echo '+pids +memory' > /sys/fs/cgroup/sarthi/cgroup.subtree_control" || true
 
-          # Ensure /sys/fs/cgroup root is delegated if runner executes at root level
+          # Grant common ancestor migration write permissions on cgroup.procs
+          sudo chmod a+w /sys/fs/cgroup/cgroup.procs || true
           sudo chown runner:runner /sys/fs/cgroup || true
 
       - name: Audit Host Kernel & cgroup v2 Topology

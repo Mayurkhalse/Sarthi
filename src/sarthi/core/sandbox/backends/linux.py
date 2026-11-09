@@ -548,7 +548,10 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
                 except Exception as attach_err:
                     # Fail-closed: kill bwrap before untrusted code can execute
                     proc.kill()
-                    proc.communicate()
+                    try:
+                        proc.communicate(timeout=2.0)
+                    except Exception:
+                        pass
                     raise SandboxInitializationError(
                         f"Failed to attach child process {proc.pid} to cgroup: {attach_err}"
                     ) from attach_err
