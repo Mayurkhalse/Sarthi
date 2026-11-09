@@ -25,7 +25,6 @@ from sarthi.core.sandbox import (
     SandboxCapabilityReport,
     SandboxCapabilityUnavailableError,
     SandboxCleanupError,
-    SandboxError,
     SandboxExecutionError,
     SandboxManager,
     SandboxPolicy,
@@ -411,7 +410,7 @@ def test_staging_cleanup_failure_raises_sandbox_cleanup_error(tmp_path: Path, mo
     (source_dir / "file.txt").write_text("data", encoding="utf-8")
 
     mgr = WorkspaceStagingManager(source_dir, base_staging_dir=tmp_path)
-    staged = mgr.stage()
+    mgr.stage()
 
     # Mock shutil.rmtree to do nothing so the folder still exists
     monkeypatch.setattr("shutil.rmtree", lambda *args, **kwargs: None)

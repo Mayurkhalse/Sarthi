@@ -1,0 +1,54 @@
+name: Security Sandbox Penetration (Linux)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  kernel-penetration:
+    name: Linux Bubblewrap & cgroup v2 Penetration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v2
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Install Bubblewrap Isolation Primitives
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+
+      - name: Audit Host Kernel & cgroup v2 Topology
+        run: |
+          echo "=== Kernel Version ==="
+          uname -a
+          echo "=== Bubblewrap Version ==="
+          bwrap --version
+          echo "=== cgroup v2 Controllers ==="
+          if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
+            cat /sys/fs/cgroup/cgroup.controllers
+          else
+            echo "cgroup v2 root controllers file not found!"
+          fi
+          echo "=== Process cgroup ==="
+          cat /proc/self/cgroup
+
+      - name: Run Adversarial Security Penetration Tests
+        env:
+          SARTHI_SANDBOX_CERTIFIED: "1"
+        run: |
+          uv run pytest -m security_ci_only tests/e2e/test_sandbox_kernel_penetration.py -v --durations=0
