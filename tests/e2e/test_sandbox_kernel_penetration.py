@@ -173,8 +173,8 @@ def test_adversarial_fork_bomb_containment(
     linux_backend: LinuxBubblewrapBackend, tmp_path: Path
 ) -> None:
     """Verifies cgroup v2 pids.max strictly bounds process creation and prevents fork bomb starvation."""
-    if not CgroupV2Manager.is_available():
-        pytest.skip("cgroup v2 is not available on this runner.")
+    if not CgroupV2Manager.is_available() or not CgroupV2Manager.is_delegated():
+        pytest.skip("cgroup v2 is not available or not delegated on this runner.")
     controllers = CgroupV2Manager.get_available_controllers()
     if "pids" not in controllers:
         pytest.skip("cgroup v2 pids controller is not enabled on this runner.")
@@ -217,8 +217,8 @@ def test_adversarial_memory_exhaustion_containment(
     linux_backend: LinuxBubblewrapBackend, tmp_path: Path
 ) -> None:
     """Verifies cgroup v2 memory.max terminates sandboxed memory hog without affecting supervisor."""
-    if not CgroupV2Manager.is_available():
-        pytest.skip("cgroup v2 is not available on this runner.")
+    if not CgroupV2Manager.is_available() or not CgroupV2Manager.is_delegated():
+        pytest.skip("cgroup v2 is not available or not delegated on this runner.")
     controllers = CgroupV2Manager.get_available_controllers()
     if "memory" not in controllers:
         pytest.skip("cgroup v2 memory controller is not enabled on this runner.")

@@ -32,18 +32,39 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bubblewrap
 
+      - name: Configure Linux Kernel User Namespaces & cgroup v2 Delegation
+        run: |
+          echo "=== Enable Unprivileged User Namespaces (Ubuntu 24.04 AppArmor) ==="
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+          echo "=== Configure cgroup v2 Delegation for Runner ==="
+          # Enable controllers in root cgroup
+          sudo bash -c "echo '+pids +memory' > /sys/fs/cgroup/cgroup.subtree_control" || true
+
+          # Identify runner's cgroup slice from /proc/self/cgroup
+          CGROUP_REL=$(grep '^0::' /proc/self/cgroup | cut -d: -f3 | sed 's|^/||')
+          echo "Runner cgroup relative path: $CGROUP_REL"
+
+          if [ -n "$CGROUP_REL" ] && [ -d "/sys/fs/cgroup/$CGROUP_REL" ]; then
+            RUNNER_CGROUP="/sys/fs/cgroup/$CGROUP_REL"
+            echo "Delegating runner cgroup: $RUNNER_CGROUP"
+            sudo chown -R runner:runner "$RUNNER_CGROUP" || true
+            sudo bash -c "echo '+pids +memory' > $RUNNER_CGROUP/cgroup.subtree_control" || true
+          fi
+
+          # Ensure /sys/fs/cgroup root is delegated if runner executes at root level
+          sudo chown runner:runner /sys/fs/cgroup || true
+
       - name: Audit Host Kernel & cgroup v2 Topology
         run: |
           echo "=== Kernel Version ==="
           uname -a
           echo "=== Bubblewrap Version ==="
           bwrap --version
+          echo "=== User Namespace Test ==="
+          bwrap --ro-bind /usr /usr --proc /proc --dev /dev --unshare-user -- true && echo "bwrap userns OK" || echo "bwrap userns FAILED"
           echo "=== cgroup v2 Controllers ==="
-          if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
-            cat /sys/fs/cgroup/cgroup.controllers
-          else
-            echo "cgroup v2 root controllers file not found!"
-          fi
+          cat /sys/fs/cgroup/cgroup.controllers || true
           echo "=== Process cgroup ==="
           cat /proc/self/cgroup
 

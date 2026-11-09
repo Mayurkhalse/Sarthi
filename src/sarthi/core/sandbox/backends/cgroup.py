@@ -77,6 +77,17 @@ class CgroupV2Manager:
         except Exception:
             return None
 
+    @classmethod
+    def is_delegated(cls, root: Path | str = DEFAULT_CGROUP2_ROOT) -> bool:
+        """Checks if current process has write permissions to create sub-cgroups in its delegated slice."""
+        if not cls.is_available():
+            return False
+        parent_dir = cls.get_current_process_cgroup_dir(root) or Path(root)
+        try:
+            return os.access(parent_dir, os.W_OK)
+        except Exception:
+            return False
+
     def allocate_sandbox_cgroup(self, cgroup_id: str) -> Path:
         """Provisions a dedicated child cgroup under the current process's slice or delegated root."""
         if not self.is_available():
@@ -85,7 +96,12 @@ class CgroupV2Manager:
         self.cgroup_id = cgroup_id
         parent_dir = self.get_current_process_cgroup_dir(self.cgroup_root) or self.cgroup_root
 
-        # Verify parent directory is writable
+        # Verify parent directory is writable before attempting allocation
+        if not os.access(parent_dir, os.W_OK):
+            raise SandboxCapabilityUnavailableError(
+                f"cgroup v2 parent directory '{parent_dir}' is not writable by current user (delegation missing). Fail-closed."
+            )
+
         target_cgroup = parent_dir / f"sarthi-sandbox-{cgroup_id}"
         try:
             # Enable controllers in parent if needed
@@ -283,3 +299,4 @@ class CgroupV2Manager:
             raise SandboxCleanupError(
                 f"Failed to remove cgroup directory '{target_path}' (residual PIDs: [{residual_pids}]): {e}"
             ) from e
+

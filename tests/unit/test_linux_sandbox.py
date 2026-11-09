@@ -30,6 +30,7 @@ from sarthi.core.sandbox.policy import (
     ResourceLimits,
     SandboxPolicy,
 )
+from sarthi.core.sandbox.result import SandboxCapabilityReport
 
 
 def test_linux_backend_is_available_on_current_host() -> None:
@@ -101,6 +102,7 @@ def test_linux_backend_detect_capabilities_success_with_cgroup_v2(tmp_path: Path
         patch("os.path.isfile", return_value=True),
         patch.object(LinuxBubblewrapBackend, "probe_bwrap_capability", return_value=(True, "Probe OK")),
         patch.object(CgroupV2Manager, "is_available", return_value=True),
+        patch.object(CgroupV2Manager, "is_delegated", return_value=True),
         patch.object(CgroupV2Manager, "get_available_controllers", return_value={"pids", "memory", "cpu"}),
         patch.dict(os.environ, {"SARTHI_SANDBOX_CERTIFIED": "1"}),
     ):
@@ -130,6 +132,7 @@ def test_linux_backend_detect_capabilities_missing_cgroup_controllers(tmp_path: 
         patch("os.path.isfile", return_value=True),
         patch.object(LinuxBubblewrapBackend, "probe_bwrap_capability", return_value=(True, "Probe OK")),
         patch.object(CgroupV2Manager, "is_available", return_value=True),
+        patch.object(CgroupV2Manager, "is_delegated", return_value=True),
         patch.object(CgroupV2Manager, "get_available_controllers", return_value={"cpu"}),  # No pids, no memory
     ):
         backend = LinuxBubblewrapBackend(bwrap_path=str(fake_bwrap))
@@ -320,6 +323,14 @@ def test_linux_backend_run_with_mocked_popen(tmp_path: Path) -> None:
     with (
         patch.object(backend, "is_available", return_value=True),
         patch.object(CgroupV2Manager, "is_available", return_value=False),
+        patch.object(
+            backend,
+            "detect_capabilities",
+            return_value=SandboxCapabilityReport(
+                backend_name="linux_bubblewrap",
+                mechanism_maturity=MechanismMaturity.PRODUCTION,
+            ),
+        ),
         patch("subprocess.Popen", return_value=mock_proc) as mock_popen,
     ):
         result = backend.run(["echo", "hello"], policy, tmp_path)
@@ -348,6 +359,14 @@ def test_linux_backend_run_timeout_terminates_process(tmp_path: Path) -> None:
     with (
         patch.object(backend, "is_available", return_value=True),
         patch.object(CgroupV2Manager, "is_available", return_value=False),
+        patch.object(
+            backend,
+            "detect_capabilities",
+            return_value=SandboxCapabilityReport(
+                backend_name="linux_bubblewrap",
+                mechanism_maturity=MechanismMaturity.PRODUCTION,
+            ),
+        ),
         patch("subprocess.Popen", return_value=mock_proc),
     ):
         result = backend.run(["sleep", "10"], policy, tmp_path)

@@ -52,6 +52,8 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
         self._bwrap_path = bwrap_path or shutil.which("bwrap")
         self._cgroup_root = Path(cgroup_root)
         self._cgroup_mgr: CgroupV2Manager | None = None
+        self._probe_result: tuple[bool, str] | None = None
+        self._cached_capability_report: SandboxCapabilityReport | None = None
         self._initialized = False
 
     @property
@@ -72,8 +74,12 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
 
     def probe_bwrap_capability(self) -> tuple[bool, str]:
         """Performs an active capability probe to verify user and mount namespace unsharing."""
+        if self._probe_result is not None:
+            return self._probe_result
+
         if not self.is_available():
-            return False, "bwrap binary missing or not running on Linux."
+            self._probe_result = (False, "bwrap binary missing or not running on Linux.")
+            return self._probe_result
 
         # Probe unprivileged user namespaces and basic mount capability
         probe_cmd = [
@@ -107,17 +113,23 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
                 timeout=5,
             )
             if res.returncode == 0:
-                return True, "Bubblewrap active namespace probe succeeded."
-            return False, f"Bubblewrap probe failed (exit code {res.returncode}): {res.stderr.strip()}"
+                self._probe_result = (True, "Bubblewrap active namespace probe succeeded.")
+            else:
+                self._probe_result = (False, f"Bubblewrap probe failed (exit code {res.returncode}): {res.stderr.strip()}")
         except Exception as e:
-            return False, f"Bubblewrap probe execution error: {e}"
+            self._probe_result = (False, f"Bubblewrap probe execution error: {e}")
+
+        return self._probe_result
 
     def detect_capabilities(self, project_root: Path) -> SandboxCapabilityReport:
         """Assesses OS-level enforcement capabilities on this host."""
+        if self._cached_capability_report is not None:
+            return self._cached_capability_report
+
         evidence: list[str] = []
 
         if not sys.platform.startswith("linux"):
-            return SandboxCapabilityReport(
+            report = SandboxCapabilityReport(
                 backend_name=self.name,
                 mechanism_maturity=self.maturity,
                 certification_tier=CertificationTier.IMPLEMENTATION_PENDING,
@@ -131,9 +143,11 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
                 child_process_inheritance=CapabilityStatus.UNSUPPORTED,
                 evidence_trace=["Not running on Linux."],
             )
+            self._cached_capability_report = report
+            return report
 
         if not self._bwrap_path or not os.path.isfile(self._bwrap_path):
-            return SandboxCapabilityReport(
+            report = SandboxCapabilityReport(
                 backend_name=self.name,
                 mechanism_maturity=self.maturity,
                 certification_tier=CertificationTier.IMPLEMENTATION_PENDING,
@@ -147,6 +161,8 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
                 child_process_inheritance=CapabilityStatus.UNSUPPORTED,
                 evidence_trace=["Bubblewrap (bwrap) binary not found on Linux host."],
             )
+            self._cached_capability_report = report
+            return report
 
         evidence.append(f"Bubblewrap binary verified at {self._bwrap_path}")
 
@@ -155,7 +171,7 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
         evidence.append(probe_msg)
 
         if not probe_ok:
-            return SandboxCapabilityReport(
+            report = SandboxCapabilityReport(
                 backend_name=self.name,
                 mechanism_maturity=self.maturity,
                 certification_tier=CertificationTier.IMPLEMENTATION_PENDING,
@@ -169,6 +185,8 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
                 child_process_inheritance=CapabilityStatus.UNSUPPORTED,
                 evidence_trace=evidence,
             )
+            self._cached_capability_report = report
+            return report
 
         # Bubblewrap core isolation capabilities verified
         fs_status = CapabilityStatus.PASS
@@ -178,22 +196,39 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
         ws_status = CapabilityStatus.PASS
         child_status = CapabilityStatus.PASS
 
-        # Evaluate cgroup v2 resource controllers
+        # Evaluate cgroup v2 resource controllers & user write delegation
         cgroup_mgr = CgroupV2Manager(self._cgroup_root)
         cgroup_available = cgroup_mgr.is_available()
-        controllers = cgroup_mgr.get_available_controllers(self._cgroup_root) if cgroup_available else set()
+        cgroup_writable = cgroup_mgr.is_delegated(self._cgroup_root)
+        controllers = (
+            cgroup_mgr.get_available_controllers(self._cgroup_root)
+            if (cgroup_available and cgroup_writable)
+            else set()
+        )
 
-        if cgroup_available:
-            evidence.append(f"cgroup v2 filesystem detected at {self._cgroup_root}")
+        if cgroup_available and cgroup_writable:
+            evidence.append(f"cgroup v2 filesystem detected and writable at {self._cgroup_root}")
             evidence.append(f"cgroup v2 controllers: {', '.join(sorted(controllers)) or 'none'}")
+        elif cgroup_available and not cgroup_writable:
+            evidence.append(
+                f"cgroup v2 filesystem present at {self._cgroup_root} but not delegated/writable by current process."
+            )
         else:
             evidence.append("cgroup v2 filesystem not available or inaccessible.")
 
         has_pids = "pids" in controllers
         has_memory = "memory" in controllers
 
-        pids_status = CapabilityStatus.PASS if (cgroup_available and has_pids) else CapabilityStatus.UNSUPPORTED
-        mem_status = CapabilityStatus.PASS if (cgroup_available and has_memory) else CapabilityStatus.UNSUPPORTED
+        pids_status = (
+            CapabilityStatus.PASS
+            if (cgroup_available and cgroup_writable and has_pids)
+            else CapabilityStatus.UNSUPPORTED
+        )
+        mem_status = (
+            CapabilityStatus.PASS
+            if (cgroup_available and cgroup_writable and has_memory)
+            else CapabilityStatus.UNSUPPORTED
+        )
 
         all_pass = (
             fs_status == CapabilityStatus.PASS
@@ -218,7 +253,7 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
 
         maturity = MechanismMaturity.PRODUCTION if probe_ok else MechanismMaturity.IMPLEMENTATION_PENDING
 
-        return SandboxCapabilityReport(
+        report = SandboxCapabilityReport(
             backend_name=self.name,
             mechanism_maturity=maturity,
             certification_tier=cert_tier,
@@ -232,6 +267,8 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
             child_process_inheritance=child_status,
             evidence_trace=evidence,
         )
+        self._cached_capability_report = report
+        return report
 
     def initialize(self, policy: SandboxPolicy, workspace_root: Path) -> None:
         """Prepares isolation backend state and verifies platform readiness."""
@@ -283,9 +320,25 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
                         resolved_p.relative_to(ws_resolved)
                     except ValueError:
                         # Outside workspace: mount read-only
-                        mount_args.extend(["--ro-bind", str(resolved_p), str(resolved_p)])
+                        resolved_str = str(resolved_p)
+                        if resolved_str not in mount_args:
+                            mount_args.extend(["--ro-bind", resolved_str, resolved_str])
             except Exception:
                 pass
+
+        # Ensure directory containing sys.executable is mounted
+        try:
+            real_exe = Path(sys.executable).resolve()
+            for cand in (real_exe.parent, real_exe.parent.parent):
+                if cand.is_dir() and cand != Path("/usr") and cand != Path("/"):
+                    try:
+                        cand.relative_to(ws_resolved)
+                    except ValueError:
+                        cand_str = str(cand)
+                        if cand_str not in mount_args:
+                            mount_args.extend(["--ro-bind", cand_str, cand_str])
+        except Exception:
+            pass
 
         # 5. Node.js runtime closure if available and outside /usr
         node_bin = shutil.which("node")
@@ -303,6 +356,7 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
                 pass
 
         # 6. Workspace Mount
+        mount_args.extend(["--dir", str(ws_resolved)])
         if policy.filesystem == FilesystemPolicy.READ_ONLY_WORKSPACE:
             mount_args.extend(["--ro-bind", str(ws_resolved), str(ws_resolved)])
         else:
@@ -383,8 +437,8 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
         if not self._initialized:
             self.initialize(policy, workspace_root)
 
-        # 1. Evaluate cgroup v2 resource controller setup
-        use_cgroup = CgroupV2Manager.is_available()
+        # 1. Evaluate cgroup v2 resource controller setup (requires both available and delegated)
+        use_cgroup = CgroupV2Manager.is_available() and CgroupV2Manager.is_delegated(self._cgroup_root)
         cgroup_mgr: CgroupV2Manager | None = None
         sync_read_fd: int | None = None
         sync_write_fd: int | None = None
