@@ -48,6 +48,18 @@ def linux_backend() -> LinuxBubblewrapBackend:
     return LinuxBubblewrapBackend()
 
 
+def get_sandbox_python() -> str:
+    """Finds an executable python binary for sandboxed adversarial testing.
+
+    Prefers system /usr/bin/python3 or /usr/bin/python (natively self-contained within
+    the sandbox's /usr mount), falling back to resolved sys.executable.
+    """
+    for candidate in ("/usr/bin/python3", "/usr/bin/python"):
+        if Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return str(Path(sys.executable).resolve())
+
+
 def test_adversarial_host_credential_denial(linux_backend: LinuxBubblewrapBackend, tmp_path: Path) -> None:
     """Verifies sandboxed process cannot read host sensitive files (/etc/shadow, /root, /etc/gshadow)."""
     script_file = tmp_path / "attack_creds.py"
@@ -71,7 +83,7 @@ sys.exit(0)
         network=NetworkPolicy.BLOCKED,
         filesystem=FilesystemPolicy.READ_WRITE_WORKSPACE,
     )
-    result = linux_backend.run([sys.executable, str(script_file)], policy, tmp_path)
+    result = linux_backend.run([get_sandbox_python(), str(script_file)], policy, tmp_path)
     assert result.exit_code == 0, f"Host credential boundary violated! Stderr: {result.stderr}"
 
 
@@ -100,7 +112,7 @@ sys.exit(0)
         network=NetworkPolicy.BLOCKED,
         filesystem=FilesystemPolicy.READ_WRITE_WORKSPACE,
     )
-    result = linux_backend.run([sys.executable, str(script_file)], policy, tmp_path)
+    result = linux_backend.run([get_sandbox_python(), str(script_file)], policy, tmp_path)
     assert result.exit_code == 0, f"Host filesystem write isolation violated! Stderr: {result.stderr}"
 
 
@@ -127,7 +139,7 @@ except OSError:
         network=NetworkPolicy.BLOCKED,
         filesystem=FilesystemPolicy.READ_WRITE_WORKSPACE,
     )
-    result = linux_backend.run([sys.executable, str(script_file)], policy, tmp_path)
+    result = linux_backend.run([get_sandbox_python(), str(script_file)], policy, tmp_path)
     assert result.exit_code == 0, f"Outbound WAN egress was permitted! Stderr: {result.stderr}"
 
 
@@ -163,7 +175,7 @@ except OSError:
         filesystem=FilesystemPolicy.READ_WRITE_WORKSPACE,
     )
     try:
-        result = linux_backend.run([sys.executable, str(script_file)], policy, tmp_path)
+        result = linux_backend.run([get_sandbox_python(), str(script_file)], policy, tmp_path)
         assert result.exit_code == 0, f"Host loopback service was reached! Stderr: {result.stderr}"
     finally:
         server.server_close()
@@ -191,15 +203,13 @@ try:
             time.sleep(2)
             sys.exit(0)
         pids.append(pid)
+    sys.exit(42)  # If all 60 forks succeeded without limit, fail
 except BlockingIOError:
     # Kernel pids.max ceiling enforced!
     sys.exit(0)
 except OSError:
     # Fork failed due to resource limits
     sys.exit(0)
-
-# If all 60 forks succeeded without limit, fail
-sys.exit(42)
 """,
         encoding="utf-8",
     )
@@ -209,7 +219,7 @@ sys.exit(42)
         filesystem=FilesystemPolicy.READ_WRITE_WORKSPACE,
         limits=ResourceLimits(max_processes=15, timeout_seconds=10),
     )
-    result = linux_backend.run([sys.executable, str(script_file)], policy, tmp_path)
+    result = linux_backend.run([get_sandbox_python(), str(script_file)], policy, tmp_path)
     assert result.exit_code == 0, f"Fork bomb breached process ceiling! Exit code: {result.exit_code}"
 
 
@@ -245,7 +255,7 @@ except MemoryError:
         filesystem=FilesystemPolicy.READ_WRITE_WORKSPACE,
         limits=ResourceLimits(max_memory_bytes=32 * 1024 * 1024, timeout_seconds=10),
     )
-    result = linux_backend.run([sys.executable, str(script_file)], policy, tmp_path)
+    result = linux_backend.run([get_sandbox_python(), str(script_file)], policy, tmp_path)
 
     # Process must either be terminated by OOM killer (exit code -9 or 137) or caught with MemoryError (exit 0)
     # It must NEVER succeed (exit 42)
@@ -280,7 +290,7 @@ sys.exit(0)
     old_val = os.environ.get(secret_key)
     os.environ[secret_key] = secret_value
     try:
-        result = linux_backend.run([sys.executable, str(script_file)], policy, tmp_path)
+        result = linux_backend.run([get_sandbox_python(), str(script_file)], policy, tmp_path)
         assert result.exit_code == 0, f"Host environment variable was leaked! Stderr: {result.stderr}"
     finally:
         if old_val is not None:

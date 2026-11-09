@@ -314,45 +314,61 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
 
         # 4. Python runtime closure (interpreter, virtualenv, base prefixes, and real executable)
         ws_resolved = workspace_root.resolve()
-        python_dirs: set[Path] = set()
+        candidate_dirs: set[Path] = set()
+
+        def _is_safe_runtime_candidate(cand_path: Path) -> bool:
+            try:
+                if not cand_path.is_dir():
+                    return False
+                if cand_path == Path("/") or cand_path == Path("/usr"):
+                    return False
+                # If path is already inside /usr (which is fully mounted read-only), skip it
+                if cand_path.is_relative_to(Path("/usr")):
+                    return False
+                return True
+            except Exception:
+                return False
 
         for py_dir in (sys.prefix, sys.base_prefix):
             if py_dir:
                 try:
                     p = Path(py_dir).resolve()
-                    if p.is_dir() and p != Path("/usr"):
-                        python_dirs.add(p)
+                    if _is_safe_runtime_candidate(p):
+                        candidate_dirs.add(p)
                 except Exception:
                     pass
 
         try:
             real_exe = Path(sys.executable).resolve()
             if real_exe.is_file():
-                for cand in (real_exe.parent, real_exe.parent.parent):
-                    if cand.is_dir() and cand != Path("/usr") and cand != Path("/"):
-                        python_dirs.add(cand)
+                for cand in (real_exe.parent.parent, real_exe.parent):
+                    if _is_safe_runtime_candidate(cand):
+                        candidate_dirs.add(cand)
         except Exception:
             pass
 
         try:
             raw_exe_parent = Path(sys.executable).parent
-            if raw_exe_parent.is_dir() and raw_exe_parent != Path("/usr/bin"):
-                python_dirs.add(raw_exe_parent.resolve())
-                if raw_exe_parent.parent.is_dir() and raw_exe_parent.parent != Path("/usr"):
-                    python_dirs.add(raw_exe_parent.parent.resolve())
+            for cand in (raw_exe_parent.parent, raw_exe_parent):
+                cand_res = cand.resolve()
+                if _is_safe_runtime_candidate(cand_res):
+                    candidate_dirs.add(cand_res)
         except Exception:
             pass
 
-        mounted_targets: set[str] = set()
-        for p_dir in sorted(python_dirs, key=lambda p: len(p.parts)):
-            p_str = str(p_dir)
-            if p_str in mounted_targets:
-                continue
+        # Calculate minimal unique root directories (filter nested subpaths to prevent EROFS in bwrap)
+        sorted_dirs = sorted(candidate_dirs, key=lambda p: len(p.parts))
+        unique_roots: list[Path] = []
+        for cand in sorted_dirs:
+            if not any(cand == r or cand.is_relative_to(r) for r in unique_roots):
+                unique_roots.append(cand)
+
+        for root in unique_roots:
             try:
-                p_dir.relative_to(ws_resolved)
+                root.relative_to(ws_resolved)
             except ValueError:
-                mount_args.extend(["--dir", p_str, "--ro-bind", p_str, p_str])
-                mounted_targets.add(p_str)
+                r_str = str(root)
+                mount_args.extend(["--dir", r_str, "--ro-bind", r_str, r_str])
 
         # 5. Node.js runtime closure if available and outside /usr
         node_bin = shutil.which("node")
@@ -361,7 +377,11 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
                 real_node = Path(node_bin).resolve()
                 if real_node.is_file():
                     node_dir = real_node.parent
-                    if node_dir != Path("/usr/bin") and node_dir != Path("/bin"):
+                    if (
+                        node_dir != Path("/usr/bin")
+                        and node_dir != Path("/bin")
+                        and _is_safe_runtime_candidate(node_dir)
+                    ):
                         try:
                             node_dir.relative_to(ws_resolved)
                         except ValueError:
