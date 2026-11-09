@@ -38,6 +38,13 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
           echo "=== Configure cgroup v2 Delegation for Runner ==="
+          # Evacuate any processes from root cgroup into an init slice to comply with 'no internal processes' rule
+          if [ -s /sys/fs/cgroup/cgroup.procs ]; then
+            echo "Moving root cgroup processes to /sys/fs/cgroup/init..."
+            sudo mkdir -p /sys/fs/cgroup/init
+            sudo bash -c "xargs -rn1 < /sys/fs/cgroup/cgroup.procs > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null || true"
+          fi
+
           # Enable controllers in root cgroup
           sudo bash -c "echo '+pids +memory' > /sys/fs/cgroup/cgroup.subtree_control" || true
 

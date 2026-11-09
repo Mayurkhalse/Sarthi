@@ -511,6 +511,11 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
                     except Exception:
                         pass
                 sync_read_fd, sync_write_fd = None, None
+                # Fail closed if resource limits were explicitly requested
+                if policy.limits.max_processes is not None or policy.limits.max_memory_bytes is not None:
+                    raise SandboxInitializationError(
+                        f"Resource limits requested ({policy.limits}), but cgroup v2 initialization failed: {e}. Fail-closed."
+                    ) from e
 
         # 2. Build Bubblewrap invocation arguments
         bwrap_args = self.build_bwrap_args(
