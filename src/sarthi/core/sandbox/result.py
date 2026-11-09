@@ -45,6 +45,7 @@ class SandboxCapabilityReport:
             and self.process_isolation == CapabilityStatus.PASS
             and self.process_count_enforcement == CapabilityStatus.PASS
             and self.resource_enforcement == CapabilityStatus.PASS
+            and self.environment_isolation == CapabilityStatus.PASS
             and self.workspace_confinement == CapabilityStatus.PASS
             and self.child_process_inheritance == CapabilityStatus.PASS
         )

@@ -451,7 +451,7 @@ To prevent labeling unverified or incomplete code as secure, Sarthi establishes 
 1. **`IMPLEMENTATION_PENDING`**: Architectural specification and threat model complete; implementation in progress.
 2. **`CAPABILITY_AVAILABLE_UNVERIFIED`**: Backend implementation and active capability probe succeed on host, but automated CI and adversarial verification suites have not executed.
 3. **`CI_VERIFIED`**: Automated CI test suite passes functional tests on the target platform runner (`ubuntu-latest` / `windows-latest`).
-4. **`PRODUCTION_CERTIFIED`**: All mandatory security capabilities (`filesystem_isolation`, `network_isolation`, `process_isolation`, `process_count_enforcement`, `resource_enforcement`, `workspace_confinement`, `child_process_inheritance`) actively evaluate to `PASS`, AND all required CI adversarial penetration tests have proven kernel-level boundaries without regressions.
+4. **`PRODUCTION_CERTIFIED`**: All mandatory security capabilities (`filesystem_isolation`, `network_isolation`, `process_isolation`, `process_count_enforcement`, `resource_enforcement`, `environment_isolation`, `workspace_confinement`, `child_process_inheritance`) actively evaluate to `PASS`, AND all required CI adversarial penetration tests have proven kernel-level boundaries without regressions.
 
 #### Strict Certification Transition Criteria:
 * **Documentation Rule:** Architecture documentation alone cannot establish production certification.
@@ -511,6 +511,7 @@ class SandboxCapabilityReport:
             and self.process_isolation == CapabilityStatus.PASS
             and self.process_count_enforcement == CapabilityStatus.PASS
             and self.resource_enforcement == CapabilityStatus.PASS
+            and self.environment_isolation == CapabilityStatus.PASS
             and self.workspace_confinement == CapabilityStatus.PASS
             and self.child_process_inheritance == CapabilityStatus.PASS
         )

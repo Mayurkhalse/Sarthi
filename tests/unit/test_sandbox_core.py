@@ -131,6 +131,25 @@ def test_capability_report_missing_capability_cannot_certify() -> None:
     assert report.is_production_certified is False
 
 
+def test_capability_report_environment_isolation_required() -> None:
+    """Verifies is_production_certified requires all 8 dimensions and fails if environment_isolation is UNVERIFIED."""
+    report = SandboxCapabilityReport(
+        backend_name="test_backend",
+        mechanism_maturity=MechanismMaturity.PRODUCTION,
+        certification_tier=CertificationTier.PRODUCTION_CERTIFIED,
+        filesystem_isolation=CapabilityStatus.PASS,
+        network_isolation=CapabilityStatus.PASS,
+        process_isolation=CapabilityStatus.PASS,
+        process_count_enforcement=CapabilityStatus.PASS,
+        resource_enforcement=CapabilityStatus.PASS,
+        environment_isolation=CapabilityStatus.UNVERIFIED,  # 8th dimension missing PASS
+        workspace_confinement=CapabilityStatus.PASS,
+        child_process_inheritance=CapabilityStatus.PASS,
+    )
+    assert report.is_production_certified is False
+    assert report.is_capable_of("environment_isolation") is False
+
+
 # ==============================================================================
 # 2. Null Backend & Fail-Closed Dispatching Tests
 # ==============================================================================
@@ -182,6 +201,44 @@ def test_sandbox_manager_rejects_deprecated_mechanism_by_default(tmp_path: Path)
     mgr = SandboxManager(backend=mock_backend)
     # Default strict policy has allow_deprecated_mechanisms=False
     with pytest.raises(SandboxCapabilityUnavailableError, match="vendor-deprecated"):
+        mgr.run(["echo", "test"], tmp_path, policy=SandboxPolicy.default_strict())
+
+
+def test_sandbox_manager_rejects_implementation_pending_backend(tmp_path: Path) -> None:
+    """Verifies SandboxManager fails closed when backend maturity is IMPLEMENTATION_PENDING."""
+    mock_backend = MagicMock(spec=BaseSandboxBackend)
+    mock_backend.name = "mock_pending"
+    mock_backend.maturity = MechanismMaturity.IMPLEMENTATION_PENDING
+    mock_backend.detect_capabilities.return_value = SandboxCapabilityReport(
+        backend_name="mock_pending",
+        mechanism_maturity=MechanismMaturity.IMPLEMENTATION_PENDING,
+        certification_tier=CertificationTier.IMPLEMENTATION_PENDING,
+        filesystem_isolation=CapabilityStatus.UNVERIFIED,
+        network_isolation=CapabilityStatus.UNVERIFIED,
+    )
+
+    mgr = SandboxManager(backend=mock_backend)
+    with pytest.raises(SandboxCapabilityUnavailableError, match="implementation is pending"):
+        mgr.run(["echo", "test"], tmp_path)
+
+
+def test_sandbox_manager_rejects_unverified_mandatory_capabilities(tmp_path: Path) -> None:
+    """Verifies UNVERIFIED status never satisfies a mandatory security requirement under strict policy."""
+    mock_backend = MagicMock(spec=BaseSandboxBackend)
+    mock_backend.name = "mock_prod"
+    mock_backend.maturity = MechanismMaturity.PRODUCTION
+    mock_backend.detect_capabilities.return_value = SandboxCapabilityReport(
+        backend_name="mock_prod",
+        mechanism_maturity=MechanismMaturity.PRODUCTION,
+        certification_tier=CertificationTier.CI_VERIFIED,
+        filesystem_isolation=CapabilityStatus.PASS,
+        network_isolation=CapabilityStatus.UNVERIFIED,  # Mandatory under BLOCKED
+        process_count_enforcement=CapabilityStatus.PASS,
+        resource_enforcement=CapabilityStatus.PASS,
+    )
+
+    mgr = SandboxManager(backend=mock_backend)
+    with pytest.raises(SandboxCapabilityUnavailableError, match="network isolation is UNVERIFIED"):
         mgr.run(["echo", "test"], tmp_path, policy=SandboxPolicy.default_strict())
 
 
@@ -345,6 +402,32 @@ def test_staging_cleans_up_on_failure(tmp_path: Path) -> None:
     # Verify no orphan staging directory remains in base_staging_dir
     staged_dirs = list(tmp_path.glob("sarthi_staged_*"))
     assert len(staged_dirs) == 0, f"Found orphan staging directories: {staged_dirs}"
+
+
+def test_staging_cleanup_failure_raises_sandbox_cleanup_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies WorkspaceStagingManager raises SandboxCleanupError if directory cannot be purged."""
+    source_dir = tmp_path / "valid_repo"
+    source_dir.mkdir()
+    (source_dir / "file.txt").write_text("data", encoding="utf-8")
+
+    mgr = WorkspaceStagingManager(source_dir, base_staging_dir=tmp_path)
+    staged = mgr.stage()
+
+    # Mock shutil.rmtree to do nothing so the folder still exists
+    monkeypatch.setattr("shutil.rmtree", lambda *args, **kwargs: None)
+
+    with pytest.raises(SandboxCleanupError, match="Failed to completely purge"):
+        mgr.cleanup()
+
+    # Un-mock to let actual cleanup happen
+    monkeypatch.undo()
+    mgr.cleanup()
+
+
+def test_base_backend_repr() -> None:
+    """Verifies BaseSandboxBackend.__repr__ formats class name, backend name, and maturity."""
+    backend = NullSandboxBackend()
+    assert repr(backend) == "<NullSandboxBackend(name='null', maturity='LEGACY_UNSUPPORTED')>"
 
 
 # ==============================================================================
@@ -532,7 +615,7 @@ def test_sandbox_manager_rejects_unsupported_process_limits(tmp_path: Path) -> N
     mgr = SandboxManager(backend=mock_backend)
     policy = SandboxPolicy(filesystem=FilesystemPolicy.READ_WRITE_WORKSPACE)
 
-    with pytest.raises(SandboxCapabilityUnavailableError, match="process count limits"):
+    with pytest.raises(SandboxCapabilityUnavailableError, match="process count enforcement is UNSUPPORTED"):
         mgr.run(["echo", "1"], tmp_path, policy=policy)
 
 

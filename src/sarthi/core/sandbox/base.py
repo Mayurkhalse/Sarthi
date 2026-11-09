@@ -30,6 +30,9 @@ class BaseSandboxBackend(ABC):
         """Context manager exit protocol guaranteeing cleanup."""
         self.cleanup()
 
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__}(name='{self.name}', maturity='{self.maturity.value}')>"
+
     @property
     @abstractmethod
     def name(self) -> str:

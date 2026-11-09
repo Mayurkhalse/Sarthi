@@ -59,6 +59,13 @@ class SandboxManager:
         """
         report = self.get_capabilities(project_root)
 
+        # Fail-closed check: Implementation pending mechanisms
+        if report.mechanism_maturity == MechanismMaturity.IMPLEMENTATION_PENDING:
+            raise SandboxCapabilityUnavailableError(
+                f"Active sandbox backend '{report.backend_name}' implementation is pending (SEC-01C). "
+                "Execution refused (fail-closed)."
+            )
+
         # Fail-closed check: Deprecated mechanisms
         if report.mechanism_maturity == MechanismMaturity.DEPRECATED and not policy.allow_deprecated_mechanisms:
             raise SandboxCapabilityUnavailableError(
@@ -71,30 +78,34 @@ class SandboxManager:
                 f"Active sandbox backend '{report.backend_name}' is unsupported. Execution refused (fail-closed)."
             )
 
-        # Fail-closed check: Filesystem isolation requirement
+        # Fail-closed check: Filesystem isolation requirement (mandatory)
         if policy.filesystem in (FilesystemPolicy.STAGED_ISOLATED, FilesystemPolicy.READ_ONLY_WORKSPACE):
-            if report.filesystem_isolation == CapabilityStatus.UNSUPPORTED:
+            if report.filesystem_isolation != CapabilityStatus.PASS:
                 raise SandboxCapabilityUnavailableError(
-                    f"Backend '{report.backend_name}' does not support required filesystem isolation. Fail-closed."
+                    f"Backend '{report.backend_name}' filesystem isolation is {report.filesystem_isolation.value} "
+                    "(requires PASS). Fail-closed."
                 )
 
-        # Fail-closed check: Network isolation requirement
+        # Fail-closed check: Network isolation requirement (mandatory when blocked)
         if policy.network == NetworkPolicy.BLOCKED:
-            if report.network_isolation == CapabilityStatus.UNSUPPORTED:
+            if report.network_isolation != CapabilityStatus.PASS:
                 raise SandboxCapabilityUnavailableError(
-                    f"Backend '{report.backend_name}' does not support required network isolation. Fail-closed."
+                    f"Backend '{report.backend_name}' network isolation is {report.network_isolation.value} "
+                    "(requires PASS). Fail-closed."
                 )
 
         # Fail-closed check: Process count limit requirement
-        if policy.limits.max_processes and report.process_count_enforcement == CapabilityStatus.UNSUPPORTED:
+        if policy.limits.max_processes and report.process_count_enforcement != CapabilityStatus.PASS:
             raise SandboxCapabilityUnavailableError(
-                f"Backend '{report.backend_name}' does not support process count limits (pids.max / Job Object limit). Fail-closed."
+                f"Backend '{report.backend_name}' process count enforcement is {report.process_count_enforcement.value} "
+                "(requires PASS). Fail-closed."
             )
 
         # Fail-closed check: Resource enforcement requirement
-        if policy.limits.max_memory_bytes and report.resource_enforcement == CapabilityStatus.UNSUPPORTED:
+        if policy.limits.max_memory_bytes and report.resource_enforcement != CapabilityStatus.PASS:
             raise SandboxCapabilityUnavailableError(
-                f"Backend '{report.backend_name}' does not support memory resource enforcement. Fail-closed."
+                f"Backend '{report.backend_name}' memory resource enforcement is {report.resource_enforcement.value} "
+                "(requires PASS). Fail-closed."
             )
 
         return report

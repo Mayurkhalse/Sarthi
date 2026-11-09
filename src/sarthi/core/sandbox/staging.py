@@ -16,6 +16,7 @@ from pathlib import Path
 from types import TracebackType
 
 from sarthi.core.sandbox.exceptions import (
+    SandboxCleanupError,
     SandboxStagingError,
     StagedWorkspaceSecurityError,
 )
@@ -44,7 +45,11 @@ class WorkspaceStagingManager:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        self.cleanup()
+        try:
+            self.cleanup()
+        except Exception:
+            if exc_type is None:
+                raise
 
     def stage(self) -> Path:
         """Stages the repository into a fresh directory tree with verified inode decoupling.
@@ -71,14 +76,21 @@ class WorkspaceStagingManager:
             raise SandboxStagingError(f"Workspace staging failed unexpectedly: {e}") from e
 
     def cleanup(self) -> None:
-        """Safely removes the staged directory tree and all contained files."""
+        """Safely removes the staged directory tree and all contained files.
+
+        Raises:
+            SandboxCleanupError: If residual files remain after cleanup.
+        """
         if self.staged_root and self.staged_root.exists():
+            target = self.staged_root
             try:
-                shutil.rmtree(self.staged_root, ignore_errors=True)
+                shutil.rmtree(target, ignore_errors=True)
             except Exception:
                 pass
             finally:
                 self.staged_root = None
+            if target.exists():
+                raise SandboxCleanupError(f"Failed to completely purge staged workspace directory: {target}")
 
     def _copy_tree_secure(self, src: Path, dst: Path) -> None:
         """Recursively copies files from src to dst with strict security validation.
