@@ -373,3 +373,51 @@ def test_linux_backend_run_timeout_terminates_process(tmp_path: Path) -> None:
 
         assert result.timed_out is True
         assert result.exit_code == -1
+
+
+def test_linux_backend_run_with_cgroup_synchronization_barrier(tmp_path: Path) -> None:
+    """Verifies run() allocates cgroup, configures limits, and attaches child process."""
+    backend = LinuxBubblewrapBackend(bwrap_path="/usr/bin/bwrap")
+    policy = SandboxPolicy(
+        limits=ResourceLimits(max_processes=32, max_memory_bytes=256 * 1024 * 1024, timeout_seconds=5),
+    )
+
+    mock_proc = MagicMock()
+    mock_proc.pid = 9876
+    mock_proc.returncode = 0
+    mock_proc.communicate.return_value = ("sandboxed inside cgroup\n", "")
+
+    mock_cgroup_mgr = MagicMock(spec=CgroupV2Manager)
+    mock_cgroup_mgr.cgroup_path = tmp_path / "mock-cgroup"
+
+    with (
+        patch.object(backend, "is_available", return_value=True),
+        patch.object(CgroupV2Manager, "is_available", return_value=True),
+        patch.object(CgroupV2Manager, "is_delegated", return_value=True),
+        patch("sarthi.core.sandbox.backends.linux.CgroupV2Manager", return_value=mock_cgroup_mgr),
+        patch.object(
+            backend,
+            "detect_capabilities",
+            return_value=SandboxCapabilityReport(
+                backend_name="linux_bubblewrap",
+                mechanism_maturity=MechanismMaturity.PRODUCTION,
+            ),
+        ),
+        patch("subprocess.Popen", return_value=mock_proc) as mock_popen,
+    ):
+        result = backend.run(["echo", "secure"], policy, tmp_path)
+
+        assert result.exit_code == 0
+        assert result.stdout == "sandboxed inside cgroup\n"
+        assert result.cleanup_successful is True
+        mock_cgroup_mgr.allocate_sandbox_cgroup.assert_called_once()
+        mock_cgroup_mgr.configure_limits.assert_called_once_with(
+            max_processes=32,
+            max_memory_bytes=256 * 1024 * 1024,
+            swap_max_bytes=0,
+            oom_group=True,
+        )
+        mock_cgroup_mgr.attach_pid.assert_called_once_with(9876)
+        mock_cgroup_mgr.cleanup.assert_called_once()
+        mock_popen.assert_called_once()
+

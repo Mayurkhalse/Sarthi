@@ -203,6 +203,11 @@ try:
             time.sleep(2)
             sys.exit(0)
         pids.append(pid)
+    try:
+        cg = open('/proc/self/cgroup').read()
+    except Exception:
+        cg = 'unknown'
+    sys.stderr.write(f"Fork bomb breached limits! Forked {len(pids)} children. Cgroup: {cg}\\n")
     sys.exit(42)  # If all 60 forks succeeded without limit, fail
 except BlockingIOError:
     # Kernel pids.max ceiling enforced!
@@ -220,7 +225,7 @@ except OSError:
         limits=ResourceLimits(max_processes=15, timeout_seconds=10),
     )
     result = linux_backend.run([get_sandbox_python(), str(script_file)], policy, tmp_path)
-    assert result.exit_code == 0, f"Fork bomb breached process ceiling! Exit code: {result.exit_code}"
+    assert result.exit_code == 0, f"Fork bomb breached process ceiling! Exit code: {result.exit_code}. Stderr: {result.stderr}"
 
 
 def test_adversarial_memory_exhaustion_containment(
@@ -243,6 +248,11 @@ try:
     # Touch pages to force physical page faulting
     for i in range(0, len(data), 4096):
         data[i] = 1
+    try:
+        cg = open('/proc/self/cgroup').read()
+    except Exception:
+        cg = 'unknown'
+    sys.stderr.write(f"Memory allocation breached limits! Cgroup: {cg}\\n")
     sys.exit(42)  # Memory limit was not enforced!
 except MemoryError:
     sys.exit(0)
@@ -259,7 +269,7 @@ except MemoryError:
 
     # Process must either be terminated by OOM killer (exit code -9 or 137) or caught with MemoryError (exit 0)
     # It must NEVER succeed (exit 42)
-    assert result.exit_code != 42, "Memory limit was violated; 120MB allocation succeeded!"
+    assert result.exit_code != 42, f"Memory limit was violated; 120MB allocation succeeded! Stderr: {result.stderr}"
     assert result.exit_code in (-9, 137, 0)
 
 

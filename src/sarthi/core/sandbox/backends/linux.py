@@ -518,20 +518,51 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
                     ) from e
 
         # 2. Build Bubblewrap invocation arguments
+        # The pre-exec synchronization barrier places the child process in the cgroup
+        # prior to calling execve("bwrap"), guaranteeing zero-race inheritance.
         bwrap_args = self.build_bwrap_args(
             policy,
             workspace_root,
-            block_fd=sync_read_fd,
+            block_fd=None,
             env=env,
         )
         full_cmd = bwrap_args + ["--"] + command
 
-        # 3. Process Execution & Pre-Exec Synchronization
+        # 3. Process Execution & Pre-Exec Synchronization Barrier
         start_time = time.monotonic()
         proc: subprocess.Popen | None = None
         pass_fds = (sync_read_fd,) if sync_read_fd is not None else ()
         cleanup_successful = True
         cleanup_error_msg: str | None = None
+
+        # Prepare pre-exec synchronization callable (POSIX only)
+        preexec_fn = None
+        if sys.platform != "win32" and cgroup_mgr and cgroup_mgr.cgroup_path and sync_read_fd is not None:
+            cgroup_procs_path = str(cgroup_mgr.cgroup_path / "cgroup.procs").encode("utf-8")
+            s_read_fd = sync_read_fd
+
+            def _cgroup_preexec() -> None:
+                # 1. Attempt pre-exec direct write to cgroup.procs (zero-race placement)
+                try:
+                    fd = os.open(cgroup_procs_path, os.O_WRONLY)
+                    try:
+                        pid_bytes = str(os.getpid()).encode("ascii")
+                        os.write(fd, pid_bytes)
+                    finally:
+                        os.close(fd)
+                except Exception:
+                    pass
+
+                # 2. Block on synchronization pipe barrier until parent verifies attachment
+                try:
+                    auth = os.read(s_read_fd, 1)
+                    if auth != b"\x01":
+                        os._exit(1)
+                    os.close(s_read_fd)
+                except Exception:
+                    os._exit(1)
+
+            preexec_fn = _cgroup_preexec
 
         try:
             # Use start_new_session=True for safe process-group signal routing
@@ -544,14 +575,23 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
                 pass_fds=pass_fds,
                 start_new_session=True,
                 close_fds=True,
+                preexec_fn=preexec_fn,
             )
 
-            # If synchronization pipe is active, attach child PID and verify before releasing
+            # If synchronization pipe is active, attach child PID and verify before releasing barrier
             if cgroup_mgr and sync_write_fd is not None:
                 try:
+                    # Close read descriptor in parent supervisor
+                    if sync_read_fd is not None:
+                        try:
+                            os.close(sync_read_fd)
+                        except OSError:
+                            pass
+                        sync_read_fd = None
+
                     cgroup_mgr.attach_pid(proc.pid)
                 except Exception as attach_err:
-                    # Fail-closed: kill bwrap before untrusted code can execute
+                    # Fail-closed: terminate child before untrusted code can execute
                     proc.kill()
                     try:
                         proc.communicate(timeout=2.0)
@@ -561,22 +601,17 @@ class LinuxBubblewrapBackend(BaseSandboxBackend):
                         f"Failed to attach child process {proc.pid} to cgroup: {attach_err}"
                     ) from attach_err
                 finally:
-                    # Release bwrap child to execve
-                    try:
-                        os.write(sync_write_fd, b"GO\n")
-                    except OSError:
-                        pass
-                    try:
-                        os.close(sync_write_fd)
-                        sync_write_fd = None
-                    except OSError:
-                        pass
-                    if sync_read_fd is not None:
+                    # Release pre-exec barrier with authorization byte
+                    if sync_write_fd is not None:
                         try:
-                            os.close(sync_read_fd)
-                            sync_read_fd = None
+                            os.write(sync_write_fd, b"\x01")
                         except OSError:
                             pass
+                        try:
+                            os.close(sync_write_fd)
+                        except OSError:
+                            pass
+                        sync_write_fd = None
 
             # 4. Wait for command completion under timeout
             stdout, stderr = proc.communicate(timeout=policy.limits.timeout_seconds)
