@@ -60,15 +60,18 @@ sarthi install antigravity
 ```
 *Sarthi automatically configures the MCP server in your IDE and injects the Core Governance Contract.*
 
-### 3. Initialize Your Project
+### 3. Start Coding in Antigravity (Zero Manual Setup!)
 
-Open your project workspace and initialize Sarthi:
+That's it! Simply open any project in Google Antigravity and prompt your AI coding agent as usual. 
 
-```bash
-sarthi init
-```
+Sarthi's injected **Core Governance Contract** instructs the AI agent to automatically call `sarthi.initialize_project` at the start of your session. Sarthi will:
+- 🔍 **Auto-detect your tech stack** (FastAPI, React, Spring Boot, etc.).
+- 📚 **Inject relevant standards and ECC skills** directly into the agent.
+- 🛑 **Intercept completions** and run `verify_project` before any task is marked done.
 
-That's it! When you prompt your AI coding agent, Sarthi automatically guides its architecture, confines its test execution, and verifies all changes before completion.
+> [!TIP]
+> **Optional: Manual Project Initialization (`sarthi init`)**
+> You do **not** need to run `sarthi init` for Antigravity to work—the AI handles it automatically! Run `sarthi init` from your terminal only if you want to pre-scaffold `.sarthi/project.yaml` to customize rules, set custom test commands, or inspect the detected stack (`sarthi context`) from your CLI ahead of time.
 
 ---
 
@@ -205,7 +208,7 @@ verify:
 | :--- | :--- |
 | `sarthi install antigravity` | Configures Sarthi MCP server in Google Antigravity with 1 click. |
 | `sarthi uninstall antigravity` | Cleanly uninstalls Sarthi and restores IDE backups byte-for-byte. |
-| `sarthi init` | Initializes `.sarthi/project.yaml` and detects codebase layers. |
+| `sarthi init` | (Optional) Manually scaffolds `.sarthi/project.yaml` and detects codebase layers. |
 | `sarthi verify` | Manually triggers the verification pipeline against changed files. |
 | `sarthi approve [path]` | Reviews and approves command templates for execution trust. |
 | `sarthi lint-standards` | Validates custom and ECC standards against schema definitions. |
