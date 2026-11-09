@@ -24,6 +24,28 @@ app.add_typer(uninstall_app)
 console = Console()
 
 
+def version_callback(value: bool) -> None:
+    if value:
+        from sarthi import __version__
+
+        console.print(f"[bold cyan]sarthi[/bold cyan] version [green]{__version__}[/green]")
+        raise typer.Exit()
+
+
+@app.callback()
+def main(
+    version: Optional[bool] = typer.Option(
+        None,
+        "--version",
+        "-v",
+        help="Show Sarthi version and exit.",
+        callback=version_callback,
+        is_eager=True,
+    ),
+) -> None:
+    """Production engineering standards for AI coding agents."""
+
+
 @app.command()
 def init(
     path: str = typer.Argument(".", help="Path to project root."),
