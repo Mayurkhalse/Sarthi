@@ -97,8 +97,8 @@ def test_windows_sandbox_timeout_enforcement(tmp_path: Path) -> None:
     backend = WindowsAppContainerBackend()
     policy = SandboxPolicy(limits=ResourceLimits(timeout_seconds=1.0))
     try:
-        # Sleep for 10 seconds using python
-        result = backend.run([sys.executable, "-c", "import time; time.sleep(10)"], policy, tmp_path)
+        # Long-running command that is terminated by timeout
+        result = backend.run(["cmd.exe", "/c", "for /L %i in (1,1,100000000) do @echo %i >nul"], policy, tmp_path)
         assert result.timed_out is True, f"Expected timed_out=True, got {result.timed_out} (exit={result.exit_code}, err={result.stderr!r}, dur={result.duration_seconds})"
         assert result.exit_code == -1
     finally:
