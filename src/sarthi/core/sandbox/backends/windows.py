@@ -538,11 +538,25 @@ class WindowsAppContainerBackend(BaseSandboxBackend):
             getattr(sys, "base_prefix", sys.prefix),
             sys.prefix,
         }
+        if hasattr(sys, "_base_executable") and sys._base_executable:
+            py_dirs.add(os.path.dirname(os.path.abspath(sys._base_executable)))
+
+        cfg_path = Path(sys.prefix) / "pyvenv.cfg"
+        if cfg_path.is_file():
+            try:
+                for line in cfg_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    if line.strip().startswith("home ="):
+                        home_dir = line.split("=", 1)[1].strip()
+                        if os.path.isdir(home_dir):
+                            py_dirs.add(home_dir)
+            except Exception:
+                pass
+
         for d in py_dirs:
             if os.path.isdir(d):
                 try:
                     subprocess.run(
-                        ["icacls", str(d), "/grant", f"*{self._appcontainer_sid_str}:(OI)(CI)RX", "/C", "/Q"],
+                        ["icacls", str(d), "/grant:r", f"*{self._appcontainer_sid_str}:(OI)(CI)RX", "/C", "/Q"],
                         capture_output=True,
                         check=False,
                     )
@@ -815,6 +829,7 @@ class WindowsAppContainerBackend(BaseSandboxBackend):
     ) -> Any:
         """Constructs a sanitized, double-null-terminated Unicode environment block."""
         safe_env = {
+            "SYSTEMDRIVE": os.environ.get("SYSTEMDRIVE", "C:"),
             "SYSTEMROOT": os.environ.get("SYSTEMROOT", r"C:\Windows"),
             "WINDIR": os.environ.get("WINDIR", r"C:\Windows"),
             "PATH": os.environ.get("PATH", r"C:\Windows\System32;C:\Windows"),
