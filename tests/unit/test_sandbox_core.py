@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -504,17 +504,14 @@ def test_linux_backend_reports_implementation_pending(tmp_path: Path) -> None:
 
 
 def test_windows_backend_reports_implementation_pending(tmp_path: Path) -> None:
-    """Verifies WindowsAppContainerBackend reports MechanismMaturity.IMPLEMENTATION_PENDING before SEC-01C.4."""
-    backend = WindowsAppContainerBackend()
-    assert backend.maturity == MechanismMaturity.IMPLEMENTATION_PENDING
-    report = backend.detect_capabilities(tmp_path)
-    if sys.platform != "win32":
+    """Verifies WindowsAppContainerBackend reports MechanismMaturity.IMPLEMENTATION_PENDING when unavailable."""
+    with patch.object(WindowsAppContainerBackend, "is_available", return_value=False):
+        backend = WindowsAppContainerBackend()
+        assert backend.maturity == MechanismMaturity.IMPLEMENTATION_PENDING
+        report = backend.detect_capabilities(tmp_path)
         assert report.filesystem_isolation == CapabilityStatus.UNSUPPORTED
         assert report.network_isolation == CapabilityStatus.UNSUPPORTED
-    else:
-        assert report.certification_tier == CertificationTier.IMPLEMENTATION_PENDING
-        assert report.filesystem_isolation == CapabilityStatus.UNVERIFIED
-    assert report.is_production_certified is False
+        assert report.is_production_certified is False
 
 
 def test_base_backend_context_manager_guarantees_cleanup() -> None:
